@@ -67,13 +67,13 @@ public class DebugTools
 					else if ( val is Color col ) props[p.Name] = new { r = col.r, g = col.g, b = col.b, a = col.a };
 					else if ( val is Angles ang ) props[p.Name] = new { pitch = ang.pitch, yaw = ang.yaw, roll = ang.roll };
 					else if ( val is Enum ) props[p.Name] = val.ToString();
-					else if ( val.GetType().IsValueType || val is string || val is int || val is float || val is bool || val is double )
+					else if ( val is string || val is int || val is float || val is bool || val is double || val is long || val is short || val is byte )
 						props[p.Name] = val;
 				}
 			}
 			catch { props[p.Name] = "<error reading>"; }
 		}
-		return new { type = comp.GetType().Name, enabled = comp.Enabled, properties = props };
+		return new { type = td.Name, enabled = comp.Enabled, properties = props };
 	}
 
 	[McpTool("sbox_debug_stack", "Returns current call stack info.")]

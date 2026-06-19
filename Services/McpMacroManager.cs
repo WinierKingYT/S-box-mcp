@@ -18,27 +18,25 @@ public static class McpMacroManager
 		lock ( _lock )
 		{
 			if ( _loaded ) return;
-			_loaded = true;
-		}
 
-		PersistenceStore.EnsureDirectory( StorageDir );
+			PersistenceStore.EnsureDirectory( StorageDir );
 
-		foreach ( var file in FileSystem.Data.FindFile( StorageDir, "*.json", false ) )
-		{
-			try
+			foreach ( var file in FileSystem.Data.FindFile( StorageDir, "*.json", false ) )
 			{
-				var path = $"{StorageDir}/{file}";
-				var macro = PersistenceStore.Load<MacroData>( path );
-				if ( macro != null && !string.IsNullOrEmpty( macro.Name ) )
+				try
 				{
-					lock ( _lock )
+					var path = $"{StorageDir}/{file}";
+					var macro = PersistenceStore.Load<MacroData>( path );
+					if ( macro != null && !string.IsNullOrEmpty( macro.Name ) )
 						_macros[macro.Name] = macro;
 				}
+				catch ( Exception e )
+				{
+					Log.Warning( $"[MCP] Failed to load macro {file}: {e.Message}" );
+				}
 			}
-			catch ( Exception e )
-			{
-				Log.Warning( $"[MCP] Failed to load macro {file}: {e.Message}" );
-			}
+
+			_loaded = true;
 		}
 	}
 

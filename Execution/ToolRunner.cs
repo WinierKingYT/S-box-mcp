@@ -131,7 +131,7 @@ public class ToolRunner
 		{
 			Interlocked.Increment( ref _totalCalls );
 			McpReplay.Record( "unknown", json, ex.Message, 0, false );
-			return (id, id.ToError( -32603, ex.InnerException?.Message ?? ex.Message ));
+			return (id, id.ToError( -32603, ex.InnerException?.Message ?? ex.Message ?? ex.GetType().Name ));
 		}
 	}
 

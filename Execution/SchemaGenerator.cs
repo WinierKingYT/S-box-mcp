@@ -9,20 +9,25 @@ namespace McpBridge.Execution;
 public class SchemaGenerator
 {
 	private object _cachedDefs;
+	private readonly object _cacheLock = new();
 
 	public object GetDefs( Dictionary<string, MethodDescription> tools )
 	{
 		if ( _cachedDefs != null ) return _cachedDefs;
-		_cachedDefs = new { tools = tools.Select( t =>
+		lock ( _cacheLock )
 		{
-			var attr = t.Value.GetCustomAttribute<McpToolAttribute>();
-			return new
+			if ( _cachedDefs != null ) return _cachedDefs;
+			_cachedDefs = new { tools = tools.Select( t =>
 			{
-				name = t.Key,
-				description = attr?.Description ?? "",
-				inputSchema = Generate( t.Value )
-			};
-		} ).ToList() };
+				var attr = t.Value.GetCustomAttribute<McpToolAttribute>();
+				return new
+				{
+					name = t.Key,
+					description = attr?.Description ?? "",
+					inputSchema = Generate( t.Value )
+				};
+			} ).ToList() };
+		}
 		return _cachedDefs;
 	}
 

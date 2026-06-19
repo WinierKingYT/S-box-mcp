@@ -104,12 +104,14 @@ public class ToolRegistry
 		}
 	}
 
-	public List<(string name, string description, string group)> ListAll()
+	public record ToolInfo( string Name, string Description, string Group, MethodDescription Method );
+
+	public List<ToolInfo> ListAll()
 	{
 		return _tools.Select( t =>
 		{
 			var attr = t.Value.GetCustomAttribute<McpToolAttribute>();
-			return (t.Key, attr?.Description ?? "", _toolGroups.GetValueOrDefault( t.Key, "" ));
+			return new ToolInfo( t.Key, attr?.Description ?? "", _toolGroups.GetValueOrDefault( t.Key, "" ), t.Value );
 		} ).ToList();
 	}
 

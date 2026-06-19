@@ -78,7 +78,7 @@ public static class McpSnapshotManager
 					return new();
 
 				return FileSystem.Data.FindFile( StorageDir, "*.json", false )
-					.Select( f => f.Substring( 0, f.LastIndexOf( '.' ) ) )
+					.Select( f => { var i = f.LastIndexOf( '.' ); return i > 0 ? f.Substring( 0, i ) : f; } )
 					.ToList();
 			}
 			catch ( Exception e )

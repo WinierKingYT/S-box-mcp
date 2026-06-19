@@ -25,9 +25,9 @@ public static class McpEditorServer
 	private static string _apiKey = DefaultApiKey;
 	private static TcpListener _listener;
 	private static CancellationTokenSource _cts;
-	private record SseSession( NetworkStream Stream, CancellationTokenSource Cts, System.Threading.SemaphoreSlim WriteLock = null );
+	private record SseSession( NetworkStream Stream, CancellationTokenSource Cts, System.Threading.SemaphoreSlim WriteLock );
 	private static readonly ConcurrentDictionary<string, SseSession> _sessions = new();
-	private record ToolDef( Func<JsonElement, object> Handler, string Description, string Group = "Editor", object InputSchema = null );
+	private record ToolDef( Func<JsonElement, Task<object>> Handler, string Description, string Group = "Editor", object InputSchema = null );
 	private static readonly ConcurrentDictionary<string, ToolDef> _tools = new();
 	private static long _sseEventId;
 	private static CancellationTokenSource _statePollCts;
@@ -35,19 +35,56 @@ public static class McpEditorServer
 	private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> _subscriptions = new();
 	private static string _lastPhase = "", _lastDay = "", _lastAlarm = "";
 	private static Func<McpContext, Task> _pipeline;
+	private static volatile string _logLevel = "info";
+	private static readonly DateTime _startTime = DateTime.UtcNow;
 
 	public static void RegisterTool( string name, string description, Func<JsonElement, object> handler, object inputSchema = null, string group = "Editor" )
 	{
-		_tools[name] = new ToolDef( handler, description, group, inputSchema );
+		_tools[name] = new ToolDef( args => Task.FromResult( handler( args ) ), description, group, inputSchema );
 		McpToolBridge.RegisterGlobalToolName( name );
 		Log.Info( $"[MCP] Tool registered: {name} \u2014 {description}" );
 	}
 
 	public static void RegisterToolAsync( string name, string description, Func<JsonElement, Task<object>> handler, object inputSchema = null, string group = "Editor" )
 	{
-		_tools[name] = new ToolDef( args => (object)handler( args ), description, group, inputSchema );
+		_tools[name] = new ToolDef( handler, description, group, inputSchema );
 		McpToolBridge.RegisterGlobalToolName( name );
 		Log.Info( $"[MCP] Async tool registered: {name} \u2014 {description}" );
+	}
+
+	public static async Task BroadcastLogAsync( string level, string logger, string message, JsonElement? data = null )
+	{
+		if ( !ShouldLog( level ) ) return;
+		var eid = Interlocked.Increment( ref _sseEventId );
+		var logEntry = new Dictionary<string, object>
+		{
+			["level"] = level,
+			["logger"] = logger,
+			["message"] = message
+		};
+		if ( data.HasValue ) logEntry["data"] = data.Value;
+		var payload = JsonSerializer.Serialize( logEntry );
+		var msg = $"id: {eid}\nevent: notifications/message\ndata: {payload}\n\n";
+		var buf = Encoding.UTF8.GetBytes( msg );
+		foreach ( var sid in _sessions.Keys.ToArray() )
+		{
+			if ( !_sessions.TryGetValue( sid, out var session ) ) continue;
+			try
+			{
+				await session.WriteLock.WaitAsync();
+				try { await session.Stream.WriteAsync( buf, 0, buf.Length ); await session.Stream.FlushAsync(); }
+				finally { session.WriteLock.Release(); }
+			}
+			catch { _sessions.TryRemove( sid, out _ ); }
+		}
+	}
+
+	private static bool ShouldLog( string level )
+	{
+		var levels = new[] { "debug", "info", "notice", "warning", "error", "critical" };
+		var currentIdx = Array.IndexOf( levels, _logLevel );
+		var msgIdx = Array.IndexOf( levels, level );
+		return currentIdx >= 0 && msgIdx >= currentIdx;
 	}
 
 	public static async Task BroadcastEventAsync( string eventType, string data, string resourceUri = null )
@@ -90,6 +127,7 @@ public static class McpEditorServer
 		_ = AcceptLoopAsync();
 		_statePollCts = new CancellationTokenSource();
 		_ = PollStateAsync( _statePollCts.Token );
+		_ = CleanupSessionsAsync();
 	}
 
 	public static void Stop()
@@ -115,14 +153,14 @@ public static class McpEditorServer
 
 		RegisterTool( "list_tools", "List all available tools", _ =>
 		{
-			return _tools.Select( t => new { name = t.Key } ).ToList();
-		} );
+			return _tools.Select( t => new { name = t.Key, group = t.Value.Group, description = t.Value.Description } ).ToList();
+		}, new { type = "object", properties = new { }, required = Array.Empty<string>() } );
 		RegisterTool( "list_objects", "List GameObjects in the scene (max 50)", _ =>
 		{
 			var scene = Game.ActiveScene;
 			if ( scene == null ) return "No active scene";
 			return scene.GetAllObjects( true ).Take( 50 ).Select( g => new { g.Name, g.Id } ).ToList();
-		} );
+		}, new { type = "object", properties = new { }, required = Array.Empty<string>() } );
 		RegisterTool( "create_object", "Create a new GameObject", args =>
 		{
 			var name = args.GetProperty( "name" ).GetString();
@@ -211,7 +249,7 @@ public static class McpEditorServer
 		{
 			var clients = _sessions.Select( kv => new { sessionId = kv.Key, connected = true, pendingRequests = 0 } ).ToList();
 			return new { count = clients.Count, clients };
-		} );
+		}, new { type = "object", properties = new { }, required = Array.Empty<string>() } );
 
 		RegisterToolAsync( "sbox_http_get", "Make an HTTP GET request. Returns status code and body.", async args =>
 		{
@@ -227,10 +265,25 @@ public static class McpEditorServer
 				}
 				var resp = await client.GetAsync( url );
 				var body = await resp.Content.ReadAsStringAsync();
-				return new { success = true, statusCode = (int)resp.StatusCode, contentType = resp.Content.Headers.ContentType?.ToString(), bodyLength = body.Length, body = body.Length <= 10000 ? body : body.Substring( 0, 10000 ) + "..." };
+				return new { success = true, statusCode = (int)resp.StatusCode, contentType = resp.Content.Headers.ContentType?.ToString(), bodyLength = body.Length, body = body.Length < 10000 ? body : body.Substring( 0, 10000 ) + "..." };
 			}
 			catch ( Exception e ) { return new { error = e.Message }; }
 		}, new { type = "object", properties = new { url = new { type = "string", description = "Target URL" }, headers = new { type = "string", description = "Optional JSON object of headers" } }, required = new[] { "url" } } );
+
+		RegisterTool( "sbox_mcp_bridge_status", "Show connected game bridges and their health", _ =>
+		{
+			var bridges = McpToolBridge.GetBridgeStatus();
+			return new { count = bridges.Length, bridges = bridges.Select( b => new { b.name, errorCount = b.errors } ) };
+		}, new { type = "object", properties = new { }, required = Array.Empty<string>() } );
+
+		RegisterTool( "get_game_state", "Get current day/phase/time", _ =>
+		{
+			var scene = Game.ActiveScene;
+			if ( scene == null ) return "No active scene";
+			var gm = scene.GetAllComponents<BlackFridayGameManager>().FirstOrDefault();
+			if ( gm == null ) return "No game manager found";
+			return new { day = gm.CurrentDay, phase = gm.CurrentPhase.ToString(), timeLeft = gm.PhaseTimeRemaining };
+		}, new { type = "object", properties = new { }, required = Array.Empty<string>() } );
 
 		RegisterToolAsync( "sbox_http_post", "Make an HTTP POST request with JSON body.", async args =>
 		{
@@ -336,7 +389,16 @@ public static class McpEditorServer
 
 				if ( path == "/health" )
 				{
-					await WriteResponseAsync( stream, 200, "text/plain", "OK" );
+					var bridges = McpToolBridge.GetBridgeStatus();
+					var health = JsonSerializer.Serialize( new
+					{
+						status = "ok",
+						uptime = Math.Round( (DateTime.UtcNow - _startTime).TotalMinutes, 1 ),
+						sessions = _sessions.Count,
+						editorTools = _tools.Count,
+						gameBridges = bridges.Select( b => new { b.name, errorCount = b.errors } )
+					} );
+					await WriteResponseAsync( stream, 200, "application/json", health );
 					return;
 				}
 
@@ -353,24 +415,18 @@ public static class McpEditorServer
 					return;
 				}
 
+				if ( method == "POST" && (path == "/mcp" || path == "/jsonrpc") )
+				{
+					var body = await ReadBodyAsync( stream, headerBuf, headerEnd, headers, buffer );
+					if ( body == null ) return;
+					await HandleStreamableHttpAsync( stream, body );
+					return;
+				}
+
 				if ( path.StartsWith( "/messages" ) && method == "POST" )
 				{
-					var bodyStart = headerEnd + 4;
-					var bodyBytes = new List<byte>();
-					if ( bodyStart < headerBuf.Count )
-						bodyBytes.AddRange( headerBuf.Skip( bodyStart ) );
-
-					if ( headers.TryGetValue( "Content-Length", out var cl ) && int.TryParse( cl, out var contentLen ) && contentLen > 0 )
-					{
-						while ( bodyBytes.Count < contentLen )
-						{
-							var read = await stream.ReadAsync( buffer, 0, Math.Min( buffer.Length, contentLen - bodyBytes.Count ) );
-							if ( read == 0 ) return;
-							bodyBytes.AddRange( buffer.AsSpan( 0, read ).ToArray() );
-						}
-					}
-
-					var body = Encoding.UTF8.GetString( bodyBytes.ToArray() );
+					var body = await ReadBodyAsync( stream, headerBuf, headerEnd, headers, buffer );
+					if ( body == null ) return;
 					var sid = ParseQueryString( path ).GetValueOrDefault( "sessionId" ) ?? "default";
 					await HandleMessageAsync( stream, sid, body );
 					return;
@@ -445,6 +501,63 @@ public static class McpEditorServer
 		await stream.FlushAsync();
 	}
 
+	private static async Task<string> ReadBodyAsync( NetworkStream stream, List<byte> headerBuf, int headerEnd, Dictionary<string, string> headers, byte[] buffer )
+	{
+		var bodyStart = headerEnd + 4;
+		var bodyBytes = new List<byte>();
+		if ( bodyStart < headerBuf.Count )
+			bodyBytes.AddRange( headerBuf.Skip( bodyStart ) );
+
+		if ( headers.TryGetValue( "Content-Length", out var cl ) && int.TryParse( cl, out var contentLen ) && contentLen > 0 )
+		{
+			while ( bodyBytes.Count < contentLen )
+			{
+				var read = await stream.ReadAsync( buffer, 0, Math.Min( buffer.Length, contentLen - bodyBytes.Count ) );
+				if ( read == 0 ) return null;
+				bodyBytes.AddRange( buffer.AsSpan( 0, read ).ToArray() );
+			}
+		}
+		return Encoding.UTF8.GetString( bodyBytes.ToArray() );
+	}
+
+	private static async Task HandleStreamableHttpAsync( NetworkStream stream, string body )
+	{
+		await GameTask.MainThread();
+
+		if ( body == null || body.Length == 0 )
+		{
+			await WriteResponseAsync( stream, 400, "application/json", "{\"error\":\"Empty request body\"}" );
+			return;
+		}
+
+		if ( _pipeline == null )
+		{
+			await WriteResponseAsync( stream, 503, "application/json", "{\"error\":\"Server not started\"}" );
+			return;
+		}
+
+		var ctx = new McpContext { Body = body, SessionId = "http" };
+
+		// Parse id from body for middleware error responses
+		try
+		{
+			using var doc = JsonDocument.Parse( body );
+			if ( doc.RootElement.TryGetProperty( "id", out var idProp ) )
+				ctx.Id = idProp.GetInt32();
+		}
+		catch { }
+
+		await _pipeline( ctx );
+
+		if ( ctx.Response == null || ctx.Response == "" )
+		{
+			await WriteResponseAsync( stream, 202, "application/json", "{}" );
+			return;
+		}
+
+		await WriteResponseAsync( stream, 200, "application/json", ctx.Response );
+	}
+
 	// ── SSE handler ────────────────────────────────────────────────
 
 	private static async Task HandleSseAsync( NetworkStream stream )
@@ -504,6 +617,12 @@ public static class McpEditorServer
 		await GameTask.MainThread();
 
 		var ctx = new McpContext { Body = body, SessionId = sid };
+		if ( _pipeline == null )
+		{
+			Log.Warning( "[MCP] Message before server started" );
+			await WriteResponseAsync( stream, 503, "application/json", "{\"error\":\"Server not started\"}" );
+			return;
+		}
 		await _pipeline( ctx );
 
 		if ( ctx.Response == null ) return;
@@ -527,7 +646,7 @@ public static class McpEditorServer
 		}
 
 		// Acknowledge POST
-		await WriteResponseAsync( stream, 202, "application/json", "" );
+		await WriteResponseAsync( stream, 202, "application/json", "{}" );
 	}
 
 	private static async Task HandleMessageCoreAsync( McpContext ctx )
@@ -550,7 +669,14 @@ public static class McpEditorServer
 				ctx.Response = id.ToOk( JsonSerializer.Serialize( new
 				{
 					protocolVersion = "2024-11-05",
-					capabilities = new { tools = new { }, resources = new { }, prompts = new { } },
+					capabilities = new
+					{
+						tools = new { },
+						resources = new { templates = new { } },
+						prompts = new { },
+						logging = new { },
+						roots = new { }
+					},
 					serverInfo = new { name = "sbox-mcp", version = "1.0.0" }
 				} ) );
 			}
@@ -563,6 +689,12 @@ public static class McpEditorServer
 			else if ( method == "ping" )
 			{
 				ctx.Response = id.ToOk( "\"pong\"" );
+			}
+			else if ( method == "logging/setLevel" )
+			{
+				var p = doc.RootElement.GetProperty( "params" );
+				_logLevel = p.TryGetProperty( "level", out var l ) ? l.GetString() ?? "info" : "info";
+				ctx.Response = id.ToOk( "{}" );
 			}
 			else if ( method == "resources/list" )
 			{
@@ -577,6 +709,15 @@ public static class McpEditorServer
 		new { uri = "sbox://file/{path}", name = "File Metadata", mimeType = "application/json", description = "File size/line count. Use sbox://file/path/to/file.ext" }
 				};
 				ctx.Response = id.ToOk( JsonSerializer.Serialize( new { resources } ) );
+			}
+			else if ( method == "resources/templates" )
+			{
+				var templates = new List<object>
+				{
+					new { uriTemplate = "sbox://image/{path}", name = "Image Preview", mimeType = "image/*", description = "Base64-encoded image at the given path" },
+					new { uriTemplate = "sbox://file/{path}", name = "File Metadata", mimeType = "application/json", description = "File size/line count at the given path" }
+				};
+				ctx.Response = id.ToOk( JsonSerializer.Serialize( new { templates } ) );
 			}
 			else if ( method == "resources/read" )
 			{
@@ -608,6 +749,17 @@ public static class McpEditorServer
 					if ( set.IsEmpty ) _subscriptions.TryRemove( uri, out _ );
 				}
 				ctx.Response = id.ToOk( "{}" );
+			}
+			else if ( method == "roots/list" )
+			{
+				var roots = new List<object>();
+				try
+				{
+					var cwd = Environment.CurrentDirectory.Replace( '\\', '/' );
+					roots.Add( new { uri = $"file:///{cwd.TrimStart( '/' )}", name = "Project Root" } );
+				}
+				catch { }
+				ctx.Response = id.ToOk( JsonSerializer.Serialize( new { roots } ) );
 			}
 			else if ( method == "prompts/list" )
 			{
@@ -657,13 +809,33 @@ public static class McpEditorServer
 			else if ( method == "tools/list" || method == "list_tools" )
 			{
 				McpBridge.McpBridgeAutoInit.EnsureCreated();
-				var allTools = _tools.Select( t => (object)new { name = t.Key, description = t.Value.Description, group = t.Value.Group, inputSchema = t.Value.InputSchema ?? new { type = "object", properties = new Dictionary<string, object>() } } ).ToList();
+				var allTools = new List<Dictionary<string, object>>();
+				foreach ( var t in _tools )
+				{
+					var entry = new Dictionary<string, object>
+					{
+						["name"] = t.Key,
+						["description"] = t.Value.Description,
+						["group"] = t.Value.Group ?? "Editor",
+						["inputSchema"] = t.Value.InputSchema ?? new { type = "object", properties = new Dictionary<string, object>() }
+					};
+					allTools.Add( entry );
+				}
 				var gameToolsJson = await McpToolBridge.ListAllGameTools();
 				if ( !string.IsNullOrEmpty( gameToolsJson ) )
 				{
-					var gameTools = JsonSerializer.Deserialize<List<object>>( gameToolsJson );
-					if ( gameTools != null )
-						allTools.AddRange( gameTools );
+					using var gameDoc = JsonDocument.Parse( gameToolsJson );
+					foreach ( var gt in gameDoc.RootElement.EnumerateArray() )
+					{
+						var entry = new Dictionary<string, object>
+						{
+							["name"] = gt.GetProperty( "name" ).GetString(),
+							["description"] = gt.GetProperty( "description" ).GetString(),
+							["group"] = gt.TryGetProperty( "group", out var g ) ? g.GetString() ?? "" : "",
+							["inputSchema"] = gt.TryGetProperty( "inputSchema", out var s ) ? JsonSerializer.Deserialize<object>( s.GetRawText() ) : new { type = "object", properties = new Dictionary<string, object>() }
+						};
+						allTools.Add( entry );
+					}
 				}
 
 				var query = "";
@@ -679,13 +851,17 @@ public static class McpEditorServer
 
 				var filtered = allTools.AsEnumerable();
 				if ( !string.IsNullOrEmpty( query ) )
-					filtered = filtered.Where( t => {
-						var obj = (dynamic)t;
-						string n = obj.name, d = obj.description;
-						return n.IndexOf( query, StringComparison.OrdinalIgnoreCase ) >= 0 || d.IndexOf( query, StringComparison.OrdinalIgnoreCase ) >= 0;
-					} );
+				{
+					var q = query;
+					filtered = filtered.Where( t =>
+						( (string)t["name"] ).IndexOf( q, StringComparison.OrdinalIgnoreCase ) >= 0 ||
+						( (string)t["description"] ).IndexOf( q, StringComparison.OrdinalIgnoreCase ) >= 0 );
+				}
 				if ( !string.IsNullOrEmpty( groupFilter ) )
-					filtered = filtered.Where( t => ((dynamic)t).group == groupFilter );
+				{
+					var g = groupFilter;
+					filtered = filtered.Where( t => (string)t["group"] == g );
+				}
 
 				var total = filtered.Count();
 				var paged = filtered.Skip( (page - 1) * perPage ).Take( perPage ).ToList();
@@ -700,17 +876,35 @@ public static class McpEditorServer
 				if ( _tools.TryGetValue( toolName, out var toolDef ) )
 				{
 					var sw = Stopwatch.StartNew();
-					var resultObj = toolDef.Handler( args );
-					if ( resultObj is Task t ) { await t; resultObj = t.GetType().GetProperty( "Result" )?.GetValue( t ); }
-					sw.Stop();
-					ctx.Response = id.ToOk( JsonSerializer.Serialize( new { content = new[] { new { type = "text", text = JsonSerializer.Serialize( resultObj ) } }, _meta = new { durationMs = Math.Round( sw.Elapsed.TotalMilliseconds, 1 ), toolName } } ) );
+					try
+					{
+						var resultObj = await toolDef.Handler( args );
+						sw.Stop();
+						ctx.Response = id.ToOk( JsonSerializer.Serialize( new { content = new[] { new { type = "text", text = JsonSerializer.Serialize( resultObj ) } }, _meta = new { durationMs = Math.Round( sw.Elapsed.TotalMilliseconds, 1 ), toolName } } ) );
+					}
+					catch ( Exception ex )
+					{
+						sw.Stop();
+						ctx.Response = id.ToError( -32603, $"Tool '{toolName}' failed: {ex.Message}" );
+					}
 				}
 				else
 				{
 					var argsJson = args.ValueKind == JsonValueKind.Undefined ? "{}" : args.GetRawText();
 					var bridgeResponse = await McpToolBridge.RouteToolRequest( toolName, argsJson );
 					if ( bridgeResponse != null )
-						ctx.Response = id.ToOk( $"{{\"content\":[{{\"type\":\"text\",\"text\":{bridgeResponse}}}]}}" );
+					{
+						try
+						{
+							using var brDoc = JsonDocument.Parse( bridgeResponse );
+							var innerResult = brDoc.RootElement.GetProperty( "result" ).GetRawText();
+							ctx.Response = id.ToOk( innerResult );
+						}
+						catch
+						{
+							ctx.Response = id.ToOk( JsonSerializer.Serialize( new { content = new[] { new { type = "text", text = bridgeResponse } } } ) );
+						}
+					}
 					else
 						ctx.Response = id.ToError( -32601, $"Tool '{toolName}' not found" );
 				}
@@ -719,16 +913,19 @@ public static class McpEditorServer
 			{
 				var sw = Stopwatch.StartNew();
 				var args = doc.RootElement.TryGetProperty( "params", out var p ) ? p : default;
-				var resultObj = toolDef.Handler( args );
-				if ( resultObj is Task taskResult )
+				try
 				{
-					await taskResult;
-					resultObj = taskResult.GetType().GetProperty( "Result" )?.GetValue( taskResult );
+					var resultObj = await toolDef.Handler( args );
+					sw.Stop();
+					ctx.Response = id.ToOk( JsonSerializer.Serialize( new { content = new[] { new { type = "text", text = JsonSerializer.Serialize( resultObj ) } }, _meta = new { durationMs = Math.Round( sw.Elapsed.TotalMilliseconds, 1 ), toolName = method } } ) );
 				}
-				sw.Stop();
-				var response = id.ToOk( JsonSerializer.Serialize( new { content = new[] { new { type = "text", text = JsonSerializer.Serialize( resultObj ) } }, _meta = new { durationMs = Math.Round( sw.Elapsed.TotalMilliseconds, 1 ), toolName = method } } ) );
+				catch ( Exception ex )
+				{
+					sw.Stop();
+					ctx.Response = id.ToError( -32603, $"Tool '{method}' failed: {ex.Message}" );
 				}
-				else if ( method == "completions/complete" )
+			}
+			else if ( method == "completions/complete" )
 			{
 				var p = doc.RootElement.GetProperty( "params" );
 				var arg = p.GetProperty( "argument" );
@@ -749,15 +946,12 @@ public static class McpEditorServer
 						var gameToolsJson = await McpToolBridge.ListAllGameTools();
 						if ( !string.IsNullOrEmpty( gameToolsJson ) )
 						{
-							var gameTools = JsonSerializer.Deserialize<List<object>>( gameToolsJson );
-							if ( gameTools != null )
+							using var gameDoc = JsonDocument.Parse( gameToolsJson );
+							foreach ( var gt in gameDoc.RootElement.EnumerateArray() )
 							{
-								foreach ( var gt in gameTools )
-								{
-									var name = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>( System.Text.Json.JsonSerializer.Serialize( gt ) ).GetProperty( "name" ).GetString();
-									if ( name.StartsWith( argValue, StringComparison.OrdinalIgnoreCase ) && !_tools.ContainsKey( name ) )
-										completions.Add( name );
-								}
+								var name = gt.GetProperty( "name" ).GetString();
+								if ( name.StartsWith( argValue, StringComparison.OrdinalIgnoreCase ) && !_tools.ContainsKey( name ) )
+									completions.Add( name );
 							}
 						}
 					}
@@ -889,6 +1083,7 @@ public static class McpEditorServer
 				if ( snapshot == _lastStateSnapshot ) continue;
 				_lastStateSnapshot = snapshot;
 
+				await BroadcastEventAsync( "notifications/resources/updated", JsonSerializer.Serialize( new { uri = "sbox://scene/state" } ), "sbox://scene/state" );
 				await BroadcastEventAsync( "notification", snapshot, "sbox://scene/state" );
 
 				// Detect events from snapshot
@@ -898,9 +1093,9 @@ public static class McpEditorServer
 					using var doc = JsonDocument.Parse( snapshot );
 					var root = doc.RootElement;
 
-					var phase = root.TryGetProperty( "phase", out var p ) ? p.GetString() ?? "" : "";
+					var phase = root.TryGetProperty( "phase", out var p ) ? p.GetRawText() : "";
 					var day = root.TryGetProperty( "day", out var d ) ? d.GetRawText() : "";
-					var alarm = root.TryGetProperty( "alarmLevel", out var a ) ? a.GetString() ?? "" : "";
+					var alarm = root.TryGetProperty( "alarmLevel", out var a ) ? a.GetRawText() : "";
 
 					if ( _lastPhase != "" && phase != "" && phase != _lastPhase && McpToolBridge.HasEventSubscribers( "phase_change" ) )
 						await BroadcastEventAsync( "event", JsonSerializer.Serialize( new { type = "phase_change", from = _lastPhase, to = phase } ) );
@@ -919,6 +1114,22 @@ public static class McpEditorServer
 			catch
 			{
 				await GameTask.Delay( 1000 );
+			}
+		}
+	}
+
+	private static async Task CleanupSessionsAsync()
+	{
+		while ( !_cts.IsCancellationRequested )
+		{
+			try { await GameTask.Delay( 30000 ); }
+			catch { break; }
+			if ( _cts.IsCancellationRequested ) break;
+
+			foreach ( var kv in _sessions.ToArray() )
+			{
+				if ( kv.Value.Cts.IsCancellationRequested )
+					_sessions.TryRemove( kv.Key, out _ );
 			}
 		}
 	}

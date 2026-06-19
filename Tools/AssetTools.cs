@@ -236,9 +236,10 @@ public class AssetTools
 					try
 					{
 						var val = prop.GetValue( comp );
-						if ( val != null && !val.GetType().IsValueType && val.GetType() != typeof( string ) )
-							continue;
-						compData[prop.Name] = val;
+						if ( val != null && val is string )
+							compData[prop.Name] = val;
+						else if ( val != null && val is not Component && val is not GameObject )
+							compData[prop.Name] = val;
 					}
 					catch { }
 				}

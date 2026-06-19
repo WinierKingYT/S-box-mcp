@@ -29,17 +29,16 @@ public sealed class McpToolDispatcher
 	public Execution.ToolRegistry Registry => _runner.Registry;
 
 	public void EnsureInitialized() => Registry.EnsureInitialized();
-	public object RunSingle( string method, string paramsJson, string sessionId = null ) => Registry.RunSingle( method, paramsJson );
+	public object RunSingle( string method, string paramsJson ) => Registry.RunSingle( method, paramsJson );
 	public string GetToolsJson()
 	{
 		var result = new List<object>();
-		var dict = Registry.GetToolsDict();
 		foreach ( var t in Registry.ListAll() )
 		{
-			if ( dict.TryGetValue( t.name, out var mdesc ) )
-				result.Add( new { name = t.name, description = t.description, group = t.group, inputSchema = Execution.SchemaGenerator.Generate( mdesc ) } );
-			else
-				result.Add( new { name = t.name, description = t.description, group = t.group, inputSchema = new { type = "object", properties = new Dictionary<string, object>() } } );
+			var schema = t.Method != null
+				? Execution.SchemaGenerator.Generate( t.Method )
+				: (object)new { type = "object", properties = new Dictionary<string, object>() };
+			result.Add( new { name = t.Name, description = t.Description, group = t.Group, inputSchema = schema } );
 		}
 		return JsonSerializer.Serialize( result );
 	}
@@ -64,7 +63,7 @@ public sealed class McpToolDispatcher
 	public async Task<string> Execute( string method, string argsJson )
 	{
 		EnsureInitialized();
-		var json = $"{{\"jsonrpc\":\"2.0\",\"method\":\"{method}\",\"params\":{argsJson},\"id\":1}}";
+		var json = JsonSerializer.Serialize( new { jsonrpc = "2.0", method, @params = JsonDocument.Parse( argsJson ?? "{}" ).RootElement, id = 1 } );
 		var result = await _runner.ExecuteAsync( json );
 		return result?.response;
 	}

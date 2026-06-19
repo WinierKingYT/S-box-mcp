@@ -13,7 +13,10 @@ public static class JsonRpcExtensions
 	};
 
 	public static string ToOk( this int? id, string result )
-		=> $"{{\"jsonrpc\":\"2.0\",\"result\":{result},\"id\":{id}}}";
+	{
+		var idVal = id.HasValue ? id.Value.ToString() : "null";
+		return $"{{\"jsonrpc\":\"2.0\",\"result\":{result},\"id\":{idVal}}}";
+	}
 
 	public static string ToError( this int? id, int code, string message )
 		=> JsonSerializer.Serialize( new { jsonrpc = "2.0", error = new { code, message }, id } );

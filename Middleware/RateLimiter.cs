@@ -20,12 +20,16 @@ public class RateLimiter
 	public bool TryAcquire()
 	{
 		var now = DateTime.UtcNow.Ticks / 10000L;
+		var oldest = now - 1000;
+		if ( _slots[_index] >= oldest )
+		{
+			_wasLimited = true;
+			return false;
+		}
 		_slots[_index] = now;
 		_index = ( _index + 1 ) % _maxPerSecond;
-		var oldest = now - 1000;
-		var limited = _slots[_index] >= oldest;
-		_wasLimited = limited;
-		return !limited;
+		_wasLimited = false;
+		return true;
 	}
 
 	public void Reset() => _wasLimited = false;

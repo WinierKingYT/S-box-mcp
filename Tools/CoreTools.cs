@@ -459,10 +459,10 @@ public class CoreTools
 			{
 				foreach ( var p in td.Properties.Where( p => p.CanRead && p.CanWrite ) )
 				{
-					try { var val = p.GetValue( c ); if ( val != null && (val.GetType().IsValueType || val is string) ) props[p.Name] = val; } catch { }
+					try { var val = p.GetValue( c ); if ( val != null && val is not Component && val is not GameObject ) props[p.Name] = val; } catch { }
 				}
 			}
-			return new { type = c.GetType().Name, enabled = c.Enabled, properties = props };
+			return new { type = td.Name, enabled = c.Enabled, properties = props };
 		} ).ToList();
 
 		return new

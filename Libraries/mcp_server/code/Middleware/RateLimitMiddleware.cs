@@ -21,9 +21,12 @@ internal sealed class SlidingWindowRateLimiter
 		lock ( _lock )
 		{
 			var now = DateTime.UtcNow.Ticks / 10000L;
+			var oldest = now - 1000;
+			if ( _slots[_index] >= oldest )
+				return false;
 			_slots[_index] = now;
 			_index = ( _index + 1 ) % _maxPerSecond;
-			return _slots[_index] < now - 1000;
+			return true;
 		}
 	}
 }

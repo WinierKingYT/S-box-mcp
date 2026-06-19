@@ -5,7 +5,14 @@ namespace McpBridge;
 
 public static class McpEvents
 {
-	public static event Action<string, string> OnEventFired;
+	private static readonly object _eventLock = new();
+	private static event Action<string, string> _onEventFired;
+
+	public static event Action<string, string> OnEventFired
+	{
+		add { lock ( _eventLock ) _onEventFired += value; }
+		remove { lock ( _eventLock ) _onEventFired -= value; }
+	}
 
 	private static readonly List<string> _eventTypes = new()
 	{
@@ -27,7 +34,7 @@ public static class McpEvents
 
 	public static void Fire( string type, string data )
 	{
-		var handler = OnEventFired;
+		var handler = _onEventFired;
 		if ( handler == null ) return;
 		foreach ( var subscriber in handler.GetInvocationList() )
 		{
