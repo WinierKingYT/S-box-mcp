@@ -56,16 +56,55 @@ public sealed class McpToolDispatcher
 	{
 		var scene = Game.ActiveScene;
 		if ( scene == null ) return "{}";
-		var gm = scene.GetAllComponents<BlackFridayGameManager>().FirstOrDefault();
-		var quota = scene.GetAllComponents<QuotaManager>().FirstOrDefault();
-		var alarm = scene.GetAllComponents<AlarmSystem>().FirstOrDefault();
+
+		object phase = null;
+		int day = 0;
+		double timeRemaining = 0;
+		double personalCash = 0;
+		string alarmLevel = "None";
+
+		var gm = scene.GetAllComponents<Component>().FirstOrDefault( c => c.GetType().Name == "BlackFridayGameManager" );
+		if ( gm != null )
+		{
+			var typeDesc = TypeLibrary.GetType( gm.GetType() );
+			if ( typeDesc != null )
+			{
+				phase = typeDesc.Properties.FirstOrDefault( p => p.Name == "CurrentPhase" )?.GetValue( gm )?.ToString();
+				var d = typeDesc.Properties.FirstOrDefault( p => p.Name == "CurrentDay" )?.GetValue( gm );
+				if ( d is int valInt ) day = valInt;
+				var rem = typeDesc.Properties.FirstOrDefault( p => p.Name == "PhaseTimeRemaining" )?.GetValue( gm );
+				if ( rem is float valFloat ) timeRemaining = Math.Round( valFloat, 1 );
+			}
+		}
+
+		var quota = scene.GetAllComponents<Component>().FirstOrDefault( c => c.GetType().Name == "QuotaManager" );
+		if ( quota != null )
+		{
+			var typeDesc = TypeLibrary.GetType( quota.GetType() );
+			if ( typeDesc != null )
+			{
+				var cash = typeDesc.Properties.FirstOrDefault( p => p.Name == "MyPersonalCash" )?.GetValue( quota );
+				if ( cash is float valFloat ) personalCash = Math.Round( valFloat, 1 );
+			}
+		}
+
+		var alarm = scene.GetAllComponents<Component>().FirstOrDefault( c => c.GetType().Name == "AlarmSystem" );
+		if ( alarm != null )
+		{
+			var typeDesc = TypeLibrary.GetType( alarm.GetType() );
+			if ( typeDesc != null )
+			{
+				alarmLevel = typeDesc.Methods.FirstOrDefault( m => m.Name == "GetAlarmLevelName" )?.Invoke( alarm, null )?.ToString() ?? "None";
+			}
+		}
+
 		return JsonSerializer.Serialize( new
 		{
-			phase = gm?.CurrentPhase.ToString(),
-			day = gm?.CurrentDay ?? 0,
-			timeRemaining = gm != null ? Math.Round( gm.PhaseTimeRemaining, 1 ) : 0,
-			personalCash = quota != null ? Math.Round( quota.MyPersonalCash, 1 ) : 0,
-			alarmLevel = alarm?.GetAlarmLevelName() ?? "None"
+			phase,
+			day,
+			timeRemaining,
+			personalCash,
+			alarmLevel
 		} );
 	}
 
@@ -73,7 +112,7 @@ public sealed class McpToolDispatcher
 	{
 		EnsureInitialized();
 		var meta = new Dictionary<string, object>();
-		var pt = McpToolBridge.CurrentProgressToken.Value;
+		var pt = McpToolBridge.CurrentProgressToken;
 		if ( !string.IsNullOrEmpty( pt ) )
 			meta["progressToken"] = pt;
 		var json = JsonSerializer.Serialize( new { jsonrpc = "2.0", method, @params = JsonDocument.Parse( argsJson ?? "{}" ).RootElement, _meta = meta.Count > 0 ? meta : null, id = 1 } );

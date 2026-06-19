@@ -45,6 +45,131 @@ public static class McpEditorServer
 	private static volatile string _defaultLogLevel = "info";
 	private static readonly DateTime _startTime = DateTime.UtcNow;
 
+	public static bool IsRunning => _listener != null;
+	public static int Port => _port;
+	public static string ApiKey => _apiKey;
+	public static int SessionCount => _sessions.Count;
+	public static IEnumerable<string> ActiveSessions => _sessions.Values.Select( s => $"{s.RemoteEndPoint} (Connected: {s.ConnectedAt.ToLocalTime():HH:mm:ss})" );
+
+	private static readonly ConcurrentQueue<string> _logQueue = new();
+	public static void AddServerLog( string msg )
+	{
+		_logQueue.Enqueue( $"[{DateTime.Now:HH:mm:ss}] {msg}" );
+		while ( _logQueue.Count > 100 ) _logQueue.TryDequeue( out _ );
+	}
+	public static IEnumerable<string> GetServerLogs() => _logQueue.ToArray();
+
+	// ── Resource Explorer API ──────────────────────────────────────────────
+	public static List<(string uri, string name, string mimeType, string description, bool isTemplate)> GetResourceDefinitions()
+	{
+		return new()
+		{
+			("sbox://scene/state",   "Game State",     "application/json", "Current phase, day, economy, alarm",             false),
+			("sbox://entities",      "Scene Entities", "application/json", "All GameObjects with positions",                 false),
+			("sbox://prefabs",       "Prefabs",        "application/json", "All available .prefab files",                   false),
+			("sbox://materials",     "Materials",      "application/json", "All available .vmat files",                     false),
+			("sbox://textures",      "Textures",       "application/json", "All available .vtex files",                     false),
+			("sbox://models",        "Models",         "application/json", "All available .vmdl files",                     false),
+			("sbox://sounds",        "Sounds",         "application/json", "All available sound files",                     false),
+			("sbox://maps",          "Maps",           "application/json", "All available .sbox map files",                 false),
+			("sbox://console/logs",  "Console Logs",   "application/json", "Recent engine log entries",                     false),
+			("sbox://file/{path}",   "File Preview",   "application/json", "File metadata. Replace {path} with file path.", true),
+		};
+	}
+
+	public static string ReadResourceContent( string uri )
+	{
+		try
+		{
+			return uri switch
+			{
+				"sbox://scene/state"  => JsonSerializer.Serialize( GetSceneState(),    new JsonSerializerOptions { WriteIndented = true } ),
+				"sbox://entities"     => JsonSerializer.Serialize( GetSceneEntities(), new JsonSerializerOptions { WriteIndented = true } ),
+				"sbox://prefabs"      => JsonSerializer.Serialize( ListAssetsByExt( ".prefab" ),                             new JsonSerializerOptions { WriteIndented = true } ),
+				"sbox://materials"    => JsonSerializer.Serialize( ListAssetsByExt( ".vmat" ),                               new JsonSerializerOptions { WriteIndented = true } ),
+				"sbox://textures"     => JsonSerializer.Serialize( ListAssetsByExt( ".vtex" ),                               new JsonSerializerOptions { WriteIndented = true } ),
+				"sbox://models"       => JsonSerializer.Serialize( ListAssetsByExt( ".vmdl" ),                               new JsonSerializerOptions { WriteIndented = true } ),
+				"sbox://sounds"       => JsonSerializer.Serialize( ListAssetsByExt( ".vsnd", ".vsndevts", ".wav", ".mp3" ),  new JsonSerializerOptions { WriteIndented = true } ),
+				"sbox://maps"         => JsonSerializer.Serialize( ListAssetsByExt( ".sbox" ),                               new JsonSerializerOptions { WriteIndented = true } ),
+				"sbox://console/logs" => JsonSerializer.Serialize( McpLogBridge.GetRecent( 100 ),                            new JsonSerializerOptions { WriteIndented = true } ),
+				_ when uri.StartsWith( "sbox://file/" ) => ReadFilePreviewContent( uri.Substring( "sbox://file/".Length ) ),
+				_ => $"// Unknown resource URI: {uri}"
+			};
+		}
+		catch ( Exception ex )
+		{
+			return $"// Error reading resource: {ex.Message}";
+		}
+	}
+
+	private static string ReadFilePreviewContent( string path )
+	{
+		try
+		{
+			if ( !FileSystem.Mounted.FileExists( path ) )
+				return $"// File not found: {path}";
+			var text = FileSystem.Mounted.ReadAllText( path );
+			var lines = text.Split( '\n' );
+			var preview = string.Join( "\n", lines.Take( 100 ) );
+			return $"// File: {path}  ({lines.Length} lines, {text.Length} bytes)\n\n{preview}";
+		}
+		catch ( Exception ex )
+		{
+			return $"// Cannot read file: {ex.Message}";
+		}
+	}
+
+	// ── Traffic & Replay Inspector API ────────────────────────────────────
+	public static List<McpBridge.ReplayRecord> GetReplayHistory( int count = 50 ) => McpBridge.McpReplay.GetHistory( count );
+	public static void ClearReplayHistory() => McpBridge.McpReplay.Clear();
+	public static bool ExportReplayScript( string path ) => McpBridge.McpReplay.ExportAsScript( path );
+	public static Dictionary<string, object> GetReplayAnalytics() => McpBridge.McpReplay.GetAnalytics();
+
+	public static async Task<object> ExecuteRegisteredTool( string name, string jsonArgs )
+	{
+		if ( !_tools.TryGetValue( name, out var toolDef ) )
+		{
+			var resStr = await McpToolBridge.RouteToolRequest( name, jsonArgs );
+			if ( resStr != null ) return resStr;
+			throw new Exception( $"Tool '{name}' not found." );
+		}
+		
+		using var doc = JsonDocument.Parse( string.IsNullOrEmpty( jsonArgs ) ? "{}" : jsonArgs );
+		return await toolDef.Handler( doc.RootElement );
+	}
+
+	public static async Task<Dictionary<string, (string description, string group, string schema)>> GetToolDescriptionsAsync()
+	{
+		var dict = new Dictionary<string, (string description, string group, string schema)>();
+		foreach ( var t in _tools )
+		{
+			dict[t.Key] = (t.Value.Description ?? "", t.Value.Group ?? "Editor", t.Value.InputSchema != null ? JsonSerializer.Serialize( t.Value.InputSchema ) : "{}");
+		}
+
+		try
+		{
+			var gameToolsJson = await McpToolBridge.ListAllGameTools();
+			if ( !string.IsNullOrEmpty( gameToolsJson ) )
+			{
+				using var gameDoc = JsonDocument.Parse( gameToolsJson );
+				foreach ( var gt in gameDoc.RootElement.EnumerateArray() )
+				{
+					var name = gt.GetProperty( "name" ).GetString();
+					if ( !string.IsNullOrEmpty( name ) )
+					{
+						var desc = gt.TryGetProperty( "description", out var d ) ? d.GetString() ?? "" : "";
+						var group = gt.TryGetProperty( "group", out var g ) ? g.GetString() ?? "" : "Game";
+						var schema = gt.TryGetProperty( "inputSchema", out var sch ) ? JsonSerializer.Serialize( sch ) : "{}";
+						dict[name] = (desc, group, schema);
+					}
+				}
+			}
+		}
+		catch { }
+
+		return dict;
+	}
+
 	public static void ReportProgress( double progress, double? total = null, string message = null )
 	{
 		McpToolBridge.ReportProgress( progress, total, message );
@@ -73,6 +198,7 @@ public static class McpEditorServer
 
 	public static async Task BroadcastLogAsync( string level, string logger, string message, JsonElement? data = null, string sourceSessionId = null )
 	{
+		AddServerLog( $"[{level.ToUpper()}] {logger}: {message}" );
 		var eid = Interlocked.Increment( ref _sseEventId );
 		var logEntry = new Dictionary<string, object>
 		{
@@ -149,7 +275,7 @@ public static class McpEditorServer
 		McpToolBridge.OnToolsChanged += () => _ = BroadcastEventAsync( "notifications/tools/list_changed", "{}" );
 		McpToolBridge.OnProgress += ( progress, total, message ) =>
 		{
-			var token = McpToolBridge.CurrentProgressToken.Value;
+			var token = McpToolBridge.CurrentProgressToken;
 			if ( string.IsNullOrEmpty( token ) ) return;
 			var data = new Dictionary<string, object> { ["progressToken"] = token, ["progress"] = progress };
 			if ( total.HasValue ) data["total"] = total.Value;
@@ -361,9 +487,12 @@ public static class McpEditorServer
 		{
 			var scene = Game.ActiveScene;
 			if ( scene == null ) return "No active scene";
-			var gm = scene.GetAllComponents<BlackFridayGameManager>().FirstOrDefault();
+			var gm = GetDynamicComponent( "BlackFridayGameManager" );
 			if ( gm == null ) return "No game manager found";
-			return new { day = gm.CurrentDay, phase = gm.CurrentPhase.ToString(), timeLeft = gm.PhaseTimeRemaining };
+			var day = GetPropValue<int>( gm, "CurrentDay" );
+			var phase = GetPropValue<string>( gm, "CurrentPhase" );
+			var timeLeft = GetPropValue<float>( gm, "PhaseTimeRemaining" );
+			return new { day, phase, timeLeft };
 		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
 
 		RegisterToolAsync( "sbox_http_post", "Make an HTTP POST request with JSON body.", async args =>
@@ -439,6 +568,700 @@ public static class McpEditorServer
 
 			return new { updated = changes, currentApiKey = _apiKey[..Math.Min( 4, _apiKey.Length )] + "..." };
 		}, new { type = "object", properties = new { apiKey = new { type = "string", description = "New API key (min 8 chars)" } }, required = Array.Empty<string>() }, annotations: new { destructiveHint = true } );
+
+		RegisterTool( "sbox_scene_list", "List available scene files (.sbox) on disk", _ =>
+		{
+			var scenes = ListAssetsByExt( ".sbox" );
+			var current = Game.ActiveScene?.Title ?? "none";
+			return new { currentScene = current, available = scenes, count = scenes.Count };
+		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
+
+		RegisterToolAsync( "sbox_scene_load", "Load a scene file by path. Uses runtime API discovery.", async args =>
+		{
+			var path = args.GetProperty( "path" ).GetString();
+			try
+			{
+				var tScene = TypeLibrary.GetType( "Sandbox.Scene" );
+				if ( tScene == null ) return new { error = "Sandbox.Scene type not found" };
+				var loadMethods = tScene.Methods.Where( m => m.Name == "LoadFromFile" || m.Name == "Load" || m.Name == "Open" ).ToList();
+				if ( loadMethods.Count == 0 ) return new { error = "No scene load method found", available = tScene.Methods.Select( m => m.Name ).Take( 20 ).ToList() };
+				var result = loadMethods[0].Invoke( null, new object[] { path } );
+				return new { success = result != null, method = loadMethods[0].Name, path };
+			}
+			catch ( Exception e ) { return new { error = e.Message }; }
+		}, new { type = "object", properties = new { path = new { type = "string", description = "Path to .sbox scene file" } }, required = new[] { "path" } }, annotations: new { destructiveHint = true } );
+
+		RegisterTool( "sbox_scene_create", "Create a new empty scene with a title. Uses runtime API discovery.", args =>
+		{
+			var title = args.TryGetProperty( "title", out var t ) ? t.GetString() ?? "New Scene" : "New Scene";
+			try
+			{
+				var tScene = TypeLibrary.GetType( "Sandbox.Scene" );
+				if ( tScene == null ) return new { error = "Sandbox.Scene type not found" };
+				var createMethods = tScene.Methods.Where( m => m.Name == "Create" || m.Name == "New" || m.Name == "CreateEmpty" ).ToList();
+				if ( createMethods.Count == 0 ) return new { error = "No scene create method found", available = tScene.Methods.Select( m => m.Name ).Take( 20 ).ToList() };
+				var result = createMethods[0].Invoke( null, null );
+				if ( result is Scene scene )
+					scene.Title = title;
+				return new { success = result != null, method = createMethods[0].Name, title };
+			}
+			catch ( Exception e ) { return new { error = e.Message }; }
+		}, new { type = "object", properties = new { title = new { type = "string", description = "Scene title" } }, required = Array.Empty<string>() }, annotations: new { destructiveHint = true } );
+
+		RegisterTool( "sbox_scene_save", "Save the active scene to a file path.", args =>
+		{
+			var path = args.GetProperty( "path" ).GetString();
+			var scene = Game.ActiveScene;
+			if ( scene == null ) return new { error = "No active scene" };
+			try
+			{
+				var tScene = TypeLibrary.GetType( typeof( Scene ) );
+				var saveMethods = tScene.Methods.Where( m => m.Name == "SaveToFile" || m.Name == "Save" || m.Name == "SaveAs" ).ToList();
+				if ( saveMethods.Count == 0 ) return new { error = "No scene save method found" };
+				saveMethods[0].Invoke( scene, new object[] { path } );
+				return new { success = true, method = saveMethods[0].Name, path };
+			}
+			catch ( Exception e ) { return new { error = e.Message }; }
+		}, new { type = "object", properties = new { path = new { type = "string", description = "Path to save .sbox scene file (e.g. scenes/my_scene.sbox)" } }, required = new[] { "path" } }, annotations: new { destructiveHint = true } );
+
+		RegisterTool( "sbox_replay_history", "View recent tool execution history", _ =>
+		{
+			var history = McpReplay.GetHistory( 50 );
+			return new { count = history.Count, history = history.Select( h => new { h.Method, h.DurationMs, h.Success, h.Timestamp } ) };
+		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
+
+		RegisterTool( "sbox_replay_analytics", "Get aggregated analytics of tool usage", _ =>
+		{
+			return McpReplay.GetAnalytics();
+		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
+
+		RegisterTool( "sbox_undo", "Undo the last action", _ =>
+		{
+			return UndoRedoManager.Undo();
+		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { destructiveHint = true } );
+
+		RegisterTool( "sbox_redo", "Redo the last undone action", _ =>
+		{
+			return UndoRedoManager.Redo();
+		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { destructiveHint = true } );
+
+		RegisterTool( "sbox_undo_history", "View undo history", _ =>
+		{
+			var history = UndoRedoManager.GetHistory();
+			return new { count = history.Count, history };
+		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
+
+		RegisterToolAsync( "sbox_batch", "Execute multiple tool calls in sequence. Input: array of {method, params?}. Returns array of results.", async args =>
+		{
+			if ( args.ValueKind != JsonValueKind.Array )
+				return new { error = "Input must be a JSON array of objects" };
+
+			var results = new List<object>();
+			foreach ( var item in args.EnumerateArray() )
+			{
+				if ( !item.TryGetProperty( "method", out var methodProp ) )
+				{
+					results.Add( new { error = "Missing 'method' property" } );
+					continue;
+				}
+
+				var method = methodProp.GetString();
+				var itemArgs = item.TryGetProperty( "params", out var pProp ) ? pProp : default;
+
+				try
+				{
+					if ( _tools.TryGetValue( method, out var toolDef ) )
+					{
+						var res = await toolDef.Handler( itemArgs );
+						results.Add( new { method, success = true, result = res } );
+					}
+					else
+					{
+						var argsJson = itemArgs.ValueKind == JsonValueKind.Undefined ? "{}" : itemArgs.GetRawText();
+						var bridgeResponse = await McpToolBridge.RouteToolRequest( method, argsJson );
+						if ( bridgeResponse != null )
+						{
+							try
+							{
+								using var brDoc = JsonDocument.Parse( bridgeResponse );
+								if ( brDoc.RootElement.TryGetProperty( "result", out var resVal ) )
+								{
+									results.Add( new { method, success = true, result = JsonSerializer.Deserialize<object>( resVal.GetRawText() ) } );
+								}
+								else
+								{
+									results.Add( new { method, success = true, result = bridgeResponse } );
+								}
+							}
+							catch
+							{
+								results.Add( new { method, success = true, result = bridgeResponse } );
+							}
+						}
+						else
+						{
+							results.Add( new { method, success = false, error = $"Method '{method}' not found" } );
+						}
+					}
+				}
+				catch ( Exception e )
+				{
+					results.Add( new { method, success = false, error = e.Message } );
+				}
+			}
+
+			return results;
+		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { destructiveHint = true } );
+
+		RegisterTool( "sbox_list_component_types", "List all available Component types (built-in and game-specific) in the project.", args =>
+		{
+			var query = args.TryGetProperty( "query", out var q ) ? q.GetString() ?? "" : "";
+			var types = TypeLibrary.GetTypes<Component>();
+			var all = new List<object>();
+			foreach ( var t in types )
+			{
+				if ( !string.IsNullOrEmpty( query ) && t.Name.IndexOf( query, StringComparison.OrdinalIgnoreCase ) < 0 && (t.FullName?.IndexOf( query, StringComparison.OrdinalIgnoreCase ) ?? -1) < 0 )
+					continue;
+
+				all.Add( new
+				{
+					name = t.Name,
+					fullName = t.FullName,
+					description = t.Description ?? ""
+				} );
+			}
+			return new { count = all.Count, types = all };
+		}, new { type = "object", properties = new { query = new { type = "string", description = "Optional text filter by component name" } }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
+
+		RegisterTool( "sbox_get_component_properties", "Get all readable properties and their values of a component on a GameObject.", args =>
+		{
+			var idStr = args.GetProperty( "id" ).GetString();
+			var componentName = args.GetProperty( "component" ).GetString();
+
+			var scene = Game.ActiveScene;
+			if ( scene == null ) return new { error = "No active scene" };
+			if ( !Guid.TryParse( idStr, out var guid ) ) return new { error = "Invalid GUID format" };
+			var go = scene.Directory.FindByGuid( guid );
+			if ( go == null ) return new { error = "GameObject not found" };
+
+			var typeDesc = McpBridge.Tools.AssetTools.FindComponentType( componentName );
+			if ( typeDesc == null ) return new { error = $"Component type '{componentName}' not found" };
+
+			var comp = go.Components.Get( typeDesc.TargetType );
+			if ( comp == null ) return new { error = $"Component '{componentName}' not attached to this GameObject" };
+
+			var properties = new Dictionary<string, object>();
+			foreach ( var prop in typeDesc.Properties )
+			{
+				if ( !prop.CanRead ) continue;
+				try
+				{
+					var val = prop.GetValue( comp );
+					if ( val != null && val is not Component && val is not GameObject )
+					{
+						properties[prop.Name] = val;
+					}
+					else if ( val != null )
+					{
+						properties[prop.Name] = val.ToString();
+					}
+					else
+					{
+						properties[prop.Name] = null;
+					}
+				}
+				catch ( Exception e )
+				{
+					properties[prop.Name] = $"<Error: {e.Message}>";
+				}
+			}
+
+			return new { id = idStr, gameObjectName = go.Name, component = typeDesc.Name, properties };
+		}, new { type = "object", properties = new { id = new { type = "string", description = "GUID of the GameObject" }, component = new { type = "string", description = "Component type name (e.g. ModelComponent)" } }, required = new[] { "id", "component" } }, annotations: new { readOnlyHint = true } );
+
+		RegisterTool( "sbox_set_component_property", "Set a property value of a component on a GameObject.", args =>
+		{
+			var idStr = args.GetProperty( "id" ).GetString();
+			var componentName = args.GetProperty( "component" ).GetString();
+			var propertyName = args.GetProperty( "property" ).GetString();
+			var valueVal = args.GetProperty( "value" );
+
+			var scene = Game.ActiveScene;
+			if ( scene == null ) return new { error = "No active scene" };
+			if ( !Guid.TryParse( idStr, out var guid ) ) return new { error = "Invalid GUID format" };
+			var go = scene.Directory.FindByGuid( guid );
+			if ( go == null ) return new { error = "GameObject not found" };
+
+			var typeDesc = McpBridge.Tools.AssetTools.FindComponentType( componentName );
+			if ( typeDesc == null ) return new { error = $"Component type '{componentName}' not found" };
+
+			var comp = go.Components.Get( typeDesc.TargetType );
+			if ( comp == null ) return new { error = $"Component '{componentName}' not attached to this GameObject" };
+
+			var prop = typeDesc.Properties.FirstOrDefault( p => string.Equals( p.Name, propertyName, StringComparison.OrdinalIgnoreCase ) );
+			if ( prop == null ) return new { error = $"Property '{propertyName}' not found on component '{componentName}'" };
+			if ( !prop.CanWrite ) return new { error = $"Property '{propertyName}' is read-only" };
+
+			try
+			{
+				var converted = McpBridge.Tools.AssetTools.ConvertValue( valueVal, prop.PropertyType );
+				if ( converted == null && prop.PropertyType.IsValueType && Nullable.GetUnderlyingType( prop.PropertyType ) == null )
+				{
+					return new { error = $"Cannot set null value to non-nullable type '{prop.PropertyType.Name}'" };
+				}
+
+				prop.SetValue( comp, converted );
+				return new { success = true, id = idStr, gameObjectName = go.Name, component = typeDesc.Name, property = prop.Name, newValue = converted?.ToString() };
+			}
+			catch ( Exception e )
+			{
+				return new { error = $"Failed to set property: {e.Message}" };
+			}
+		}, new { type = "object", properties = new { id = new { type = "string", description = "GUID of the GameObject" }, component = new { type = "string", description = "Component type name" }, property = new { type = "string", description = "Property name" }, value = new { type = "string", description = "Value to set (can be any type: string, number, bool, object for Vector3/Rotation)" } }, required = new[] { "id", "component", "property", "value" } }, annotations: new { destructiveHint = true } );
+
+		RegisterTool( "sbox_call_component_method", "Invoke a method on a component on a GameObject.", args =>
+		{
+			var idStr = args.GetProperty( "id" ).GetString();
+			var componentName = args.GetProperty( "component" ).GetString();
+			var methodName = args.GetProperty( "method" ).GetString();
+
+			var scene = Game.ActiveScene;
+			if ( scene == null ) return new { error = "No active scene" };
+			if ( !Guid.TryParse( idStr, out var guid ) ) return new { error = "Invalid GUID format" };
+			var go = scene.Directory.FindByGuid( guid );
+			if ( go == null ) return new { error = "GameObject not found" };
+
+			var typeDesc = McpBridge.Tools.AssetTools.FindComponentType( componentName );
+			if ( typeDesc == null ) return new { error = $"Component type '{componentName}' not found" };
+
+			var comp = go.Components.Get( typeDesc.TargetType );
+			if ( comp == null ) return new { error = $"Component '{componentName}' not attached to this GameObject" };
+
+			var method = typeDesc.Methods.FirstOrDefault( m => string.Equals( m.Name, methodName, StringComparison.OrdinalIgnoreCase ) );
+			if ( method == null ) return new { error = $"Method '{methodName}' not found on component '{componentName}'" };
+
+			var methodParams = new List<object>();
+			if ( args.TryGetProperty( "params", out var pEl ) && pEl.ValueKind == JsonValueKind.Array )
+			{
+				var parameters = method.Parameters;
+				var idx = 0;
+				foreach ( var paramEl in pEl.EnumerateArray() )
+				{
+					if ( idx >= parameters.Length ) break;
+					var paramType = parameters[idx].ParameterType;
+					var converted = McpBridge.Tools.AssetTools.ConvertValue( paramEl, paramType );
+					methodParams.Add( converted );
+					idx++;
+				}
+				while ( idx < parameters.Length )
+				{
+					methodParams.Add( null );
+					idx++;
+				}
+			}
+			else
+			{
+				if ( method.Parameters.Length > 0 && method.Parameters.Any( p => !p.IsOptional ) )
+				{
+					return new { error = $"Method '{methodName}' requires parameters but none were provided." };
+				}
+			}
+
+			try
+			{
+				var res = method.Invoke( comp, methodParams.ToArray() );
+				return new { success = true, id = idStr, gameObjectName = go.Name, component = typeDesc.Name, method = method.Name, returnValue = res?.ToString() };
+			}
+			catch ( Exception e )
+			{
+				return new { error = $"Failed to invoke method: {e.Message}" };
+			}
+		}, new { type = "object", properties = new { id = new { type = "string", description = "GUID of the GameObject" }, component = new { type = "string", description = "Component type name" }, method = new { type = "string", description = "Method name to invoke" }, @params = new { type = "array", description = "Optional array of parameters to pass to the method" } }, required = new[] { "id", "component", "method" } }, annotations: new { destructiveHint = true } );
+
+		RegisterToolAsync( "sbox_compile_project", "Compile the C# project and return structured build errors/warnings.", async _ =>
+		{
+			try
+			{
+				var pInfo = new ProcessStartInfo
+				{
+					FileName = "dotnet",
+					Arguments = "build \"Code/blackfriday2.csproj\" --nologo",
+					WorkingDirectory = Environment.CurrentDirectory,
+					RedirectStandardOutput = true,
+					RedirectStandardError = true,
+					UseShellExecute = false,
+					CreateNoWindow = true
+				};
+
+				using var proc = Process.Start( pInfo );
+				if ( proc == null ) return new { success = false, error = "Failed to start dotnet build process" };
+
+				var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+				var stderrTask = proc.StandardError.ReadToEndAsync();
+
+				await Task.WhenAll( stdoutTask, stderrTask );
+				proc.WaitForExit();
+
+				var stdout = stdoutTask.Result;
+				var stderr = stderrTask.Result;
+				var errors = new List<object>();
+				var warnings = new List<object>();
+
+				var lines = stdout.Split( new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries );
+				foreach ( var line in lines )
+				{
+					if ( line.Contains( "): error " ) )
+					{
+						var parsed = ParseBuildMessage( line, "error" );
+						if ( parsed != null ) errors.Add( parsed );
+					}
+					else if ( line.Contains( "): warning " ) )
+					{
+						var parsed = ParseBuildMessage( line, "warning" );
+						if ( parsed != null ) warnings.Add( parsed );
+					}
+				}
+
+				return new
+				{
+					success = proc.ExitCode == 0,
+					exitCode = proc.ExitCode,
+					errorCount = errors.Count,
+					warningCount = warnings.Count,
+					errors,
+					warnings,
+					rawOutput = stdout.Length > 5000 ? stdout[..5000] + "..." : stdout
+				};
+			}
+			catch ( Exception e )
+			{
+				return new { success = false, error = e.Message };
+			}
+		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
+
+		RegisterTool( "sbox_get_scene_hierarchy", "Get a tree-like representation of all GameObjects in the active scene.", _ =>
+		{
+			var scene = Game.ActiveScene;
+			if ( scene == null ) return new { error = "No active scene" };
+
+			var rootNodes = new List<object>();
+			foreach ( var go in scene.Children )
+			{
+				if ( go.IsValid() ) rootNodes.Add( BuildSceneNode( go ) );
+			}
+
+			return new { activeScene = scene.Title ?? "Untitled", rootNodes };
+		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
+
+		RegisterTool( "sbox_instantiate_prefab", "Instantiate a prefab file in the scene.", args =>
+		{
+			var path = args.GetProperty( "path" ).GetString();
+			var x = args.TryGetProperty( "x", out var xp ) ? xp.GetSingle() : 0f;
+			var y = args.TryGetProperty( "y", out var yp ) ? yp.GetSingle() : 0f;
+			var z = args.TryGetProperty( "z", out var zp ) ? zp.GetSingle() : 0f;
+			var parentGuidStr = args.TryGetProperty( "parentGuid", out var pg ) ? pg.GetString() : null;
+
+			var scene = Game.ActiveScene;
+			if ( scene == null ) return new { error = "No active scene" };
+
+			GameObject parentGo = null;
+			if ( !string.IsNullOrEmpty( parentGuidStr ) && Guid.TryParse( parentGuidStr, out var parentGuid ) )
+			{
+				parentGo = scene.Directory.FindByGuid( parentGuid );
+				if ( parentGo == null ) return new { error = $"Parent GameObject with GUID '{parentGuidStr}' not found" };
+			}
+
+			try
+			{
+				var resourceLibType = TypeLibrary.GetType( "Sandbox.ResourceLibrary" );
+				var getMethod = resourceLibType?.Methods.FirstOrDefault( m => m.Name == "Get" );
+				if ( getMethod == null ) return new { error = "ResourceLibrary.Get not found" };
+
+				var prefab = getMethod.Invoke( null, new object[] { path } );
+				if ( prefab == null ) return new { error = $"Prefab not found at path: {path}" };
+
+				var sceneUtilType = TypeLibrary.GetType( "Sandbox.SceneUtility" );
+				var getSceneMethod = sceneUtilType?.Methods.FirstOrDefault( m => m.Name == "GetPrefabScene" );
+				if ( getSceneMethod == null ) return new { error = "SceneUtility.GetPrefabScene not found" };
+
+				var prefabScene = getSceneMethod.Invoke( null, new object[] { prefab } );
+				if ( prefabScene == null ) return new { error = "GetPrefabScene returned null" };
+
+				var psTd = TypeLibrary.GetType( prefabScene.GetType() );
+				var cloneMethod = psTd?.Methods.FirstOrDefault( m => m.Name == "Clone" );
+				if ( cloneMethod == null ) return new { error = "Clone method not found on prefab scene" };
+
+				var go = cloneMethod.Invoke( prefabScene, Array.Empty<object>() ) as GameObject;
+				if ( go == null || !go.IsValid() ) return new { error = "Failed to clone prefab scene" };
+
+				if ( parentGo != null )
+				{
+					go.Parent = parentGo;
+				}
+				go.WorldPosition = new Vector3( x, y, z );
+
+				return new { success = true, id = go.Id.ToString(), name = go.Name, position = new { x, y, z } };
+			}
+			catch ( Exception e )
+			{
+				return new { error = $"Instantiation failed: {e.Message}" };
+			}
+		}, new { type = "object", properties = new { path = new { type = "string", description = "Path to the .prefab file (e.g. prefabs/dummy_bot.prefab)" }, x = new { type = "number", description = "Target X position" }, y = new { type = "number", description = "Target Y position" }, z = new { type = "number", description = "Target Z position" }, parentGuid = new { type = "string", description = "Optional GUID of the parent GameObject" } }, required = new[] { "path" } }, annotations: new { destructiveHint = true } );
+
+		RegisterTool( "sbox_search_assets", "Search for assets (models, prefabs, sounds, materials) in the project.", args =>
+		{
+			var query = args.TryGetProperty( "query", out var q ) ? q.GetString() ?? "" : "";
+			var ext = args.TryGetProperty( "extension", out var e ) ? e.GetString() ?? "" : "";
+
+			var exts = string.IsNullOrEmpty( ext ) 
+				? new[] { ".prefab", ".vmdl", ".vmat", ".vsnd", ".vtex" } 
+				: new[] { ext.StartsWith(".") ? ext : "." + ext };
+
+			var files = new List<string>();
+			foreach ( var extension in exts )
+			{
+				try
+				{
+					var found = FileSystem.Mounted.FindFile( ".", $"*{extension}", true );
+					foreach ( var f in found )
+					{
+						var normalPath = f.Replace( '\\', '/' );
+						if ( string.IsNullOrEmpty( query ) || normalPath.IndexOf( query, StringComparison.OrdinalIgnoreCase ) >= 0 )
+						{
+							files.Add( normalPath );
+						}
+					}
+				}
+				catch { }
+			}
+
+			var limited = files.Take( 100 ).ToList();
+			return new { totalCount = files.Count, returnedCount = limited.Count, assets = limited };
+		}, new { type = "object", properties = new { query = new { type = "string", description = "Text to search in asset paths" }, extension = new { type = "string", description = "Optional asset extension (e.g. .prefab, .vmdl, .vsnd)" } }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
+
+		RegisterTool( "sbox_inspect_prefab", "Read and inspect a .prefab file structure without instantiating it.", args =>
+		{
+			var path = args.GetProperty( "path" ).GetString();
+			try
+			{
+				if ( !FileSystem.Mounted.FileExists( path ) )
+					return new { error = $"Prefab file not found: {path}" };
+
+				var jsonText = FileSystem.Mounted.ReadAllText( path );
+				using var doc = JsonDocument.Parse( jsonText );
+				return new { path, structure = doc.RootElement.Clone() };
+			}
+			catch ( Exception e )
+			{
+				return new { error = $"Failed to read prefab: {e.Message}" };
+			}
+		}, new { type = "object", properties = new { path = new { type = "string", description = "Path to the .prefab file" } }, required = new[] { "path" } }, annotations: new { readOnlyHint = true } );
+
+		RegisterTool( "sbox_create_component_class", "Create a new C# Component script template in the project's Code folder.", args =>
+		{
+			var name = args.GetProperty( "name" ).GetString().Trim();
+			var subFolder = args.TryGetProperty( "subFolder", out var sf ) ? sf.GetString() ?? "" : "";
+
+			var className = new string( name.Where( char.IsLetterOrDigit ).ToArray() );
+			if ( string.IsNullOrEmpty( className ) || !char.IsLetter( className[0] ) )
+				return new { error = "Invalid component name. Must start with a letter and contain only alphanumeric characters." };
+
+			var folderPath = string.IsNullOrEmpty( subFolder ) 
+				? System.IO.Path.Combine( Environment.CurrentDirectory, "Code" ) 
+				: System.IO.Path.Combine( Environment.CurrentDirectory, "Code", subFolder );
+
+			var filePath = System.IO.Path.Combine( folderPath, $"{className}.cs" );
+
+			try
+			{
+				if ( !System.IO.Directory.Exists( folderPath ) )
+				{
+					System.IO.Directory.CreateDirectory( folderPath );
+				}
+
+				if ( System.IO.File.Exists( filePath ) )
+					return new { error = $"File already exists at: {filePath.Replace( '\\', '/' )}" };
+
+				var template = $@"using Sandbox;
+using System;
+
+{( string.IsNullOrEmpty( subFolder ) ? "namespace Sandbox;" : $"namespace Sandbox.{subFolder.Replace( '/', '.' ).Replace( '\\', '.' )};" )}
+
+public sealed class {className} : Component
+{{
+	[Property] public float Speed {{ get; set; }} = 100f;
+
+	protected override void OnStart()
+	{{
+		Log.Info( ""{className} started!"" );
+	}}
+
+	protected override void OnUpdate()
+	{{
+	}}
+
+	protected override void OnFixedUpdate()
+	{{
+	}}
+}}
+";
+
+				System.IO.File.WriteAllText( filePath, template );
+				return new { success = true, filePath = filePath.Replace( '\\', '/' ), className };
+			}
+			catch ( Exception e )
+			{
+				return new { error = $"Failed to create component class: {e.Message}" };
+			}
+		}, new { type = "object", properties = new { name = new { type = "string", description = "Name of the class (e.g. MyTriggerListener)" }, subFolder = new { type = "string", description = "Optional subfolder inside Code/ (e.g. Player, AI, UI)" } }, required = new[] { "name" } }, annotations: new { destructiveHint = true } );
+
+		RegisterTool( "sbox_run_console_command", "Run a console command in the game/editor system.", args =>
+		{
+			var cmd = args.GetProperty( "command" ).GetString();
+			try
+			{
+				var tConsole = TypeLibrary.GetType( "Sandbox.ConsoleSystem" ) ?? TypeLibrary.GetType( "Sandbox.Editor.Console" );
+				if ( tConsole == null ) return new { error = "Console system type not found" };
+
+				var runMethod = tConsole.Methods.FirstOrDefault( m => m.Name == "Run" && m.Parameters.Length == 1 && m.Parameters[0].ParameterType == typeof( string ) );
+				if ( runMethod == null ) return new { error = "ConsoleSystem.Run(string) method not found" };
+
+				runMethod.Invoke( null, new object[] { cmd } );
+				return new { success = true, command = cmd };
+			}
+			catch ( Exception e )
+			{
+				return new { error = $"Failed to run command: {e.Message}" };
+			}
+		}, new { type = "object", properties = new { command = new { type = "string", description = "The console command string to execute (e.g. noclip)" } }, required = new[] { "command" } }, annotations: new { destructiveHint = true } );
+
+		RegisterTool( "sbox_focus_camera", "Move the main scene camera to focus on a target GameObject.", args =>
+		{
+			var idStr = args.GetProperty( "id" ).GetString();
+			var distance = args.TryGetProperty( "distance", out var distProp ) ? distProp.GetSingle() : 150f;
+
+			var scene = Game.ActiveScene;
+			if ( scene == null ) return new { error = "No active scene" };
+			if ( !Guid.TryParse( idStr, out var guid ) ) return new { error = "Invalid GUID format" };
+			var go = scene.Directory.FindByGuid( guid );
+			if ( go == null ) return new { error = "GameObject not found" };
+
+			var camera = scene.Camera;
+			if ( camera == null ) return new { error = "No camera component found in active scene" };
+
+			var targetPos = go.WorldPosition;
+			var offset = new Vector3( -1f, 1f, 0.75f ).Normal * distance;
+			camera.WorldPosition = targetPos + offset;
+
+			var lookDir = (targetPos - camera.WorldPosition).Normal;
+			camera.WorldRotation = Rotation.LookAt( lookDir, Vector3.Up );
+
+			return new { success = true, focusedObjectId = idStr, focusedObjectName = go.Name, cameraPosition = new { x = camera.WorldPosition.x, y = camera.WorldPosition.y, z = camera.WorldPosition.z } };
+		}, new { type = "object", properties = new { id = new { type = "string", description = "GUID of the GameObject to focus on" }, distance = new { type = "number", description = "Distance from camera to target" } }, required = new[] { "id" } }, annotations: new { destructiveHint = true } );
+
+		RegisterTool( "sbox_find_by_component", "Find all GameObjects in the scene that have a specific component.", args =>
+		{
+			var componentName = args.GetProperty( "component" ).GetString();
+			var scene = Game.ActiveScene;
+			if ( scene == null ) return new { error = "No active scene" };
+
+			var typeDesc = McpBridge.Tools.AssetTools.FindComponentType( componentName );
+			if ( typeDesc == null ) return new { error = $"Component type '{componentName}' not found" };
+
+			var gameObjects = new List<object>();
+			foreach ( var go in scene.GetAllObjects( true ) )
+			{
+				var comp = go.Components.Get( typeDesc.TargetType );
+				if ( comp.IsValid() )
+				{
+					gameObjects.Add( new { id = go.Id.ToString(), name = go.Name, position = new { x = go.WorldPosition.x, y = go.WorldPosition.y, z = go.WorldPosition.z } });
+				}
+			}
+
+			return new { count = gameObjects.Count, component = typeDesc.Name, gameObjects };
+		}, new { type = "object", properties = new { component = new { type = "string", description = "Component name (e.g. ModelComponent)" } }, required = new[] { "component" } }, annotations: new { readOnlyHint = true } );
+
+		RegisterTool( "sbox_find_by_name", "Find all GameObjects in the scene by name (wildcard/substring search).", args =>
+		{
+			var nameQuery = args.GetProperty( "name" ).GetString();
+			var scene = Game.ActiveScene;
+			if ( scene == null ) return new { error = "No active scene" };
+
+			var list = new List<object>();
+			foreach ( var go in scene.GetAllObjects( true ) )
+			{
+				if ( go.IsValid() && go.Name.IndexOf( nameQuery, StringComparison.OrdinalIgnoreCase ) >= 0 )
+				{
+					list.Add( new
+					{
+						id = go.Id.ToString(),
+						name = go.Name,
+						position = new { x = go.WorldPosition.x, y = go.WorldPosition.y, z = go.WorldPosition.z }
+					} );
+				}
+			}
+			return new { count = list.Count, query = nameQuery, gameObjects = list };
+		}, new { type = "object", properties = new { name = new { type = "string", description = "GameObject name or substring to search for" } }, required = new[] { "name" } }, annotations: new { readOnlyHint = true } );
+
+		RegisterTool( "sbox_raycast", "Perform a physics raycast in the active scene.", args =>
+		{
+			var startX = args.GetProperty( "startX" ).GetSingle();
+			var startY = args.GetProperty( "startY" ).GetSingle();
+			var startZ = args.GetProperty( "startZ" ).GetSingle();
+			var endX = args.GetProperty( "endX" ).GetSingle();
+			var endY = args.GetProperty( "endY" ).GetSingle();
+			var endZ = args.GetProperty( "endZ" ).GetSingle();
+
+			var scene = Game.ActiveScene;
+			if ( scene == null ) return new { error = "No active scene" };
+
+			try
+			{
+				var start = new Vector3( startX, startY, startZ );
+				var end = new Vector3( endX, endY, endZ );
+				var tr = scene.Trace.Ray( start, end ).Run();
+
+				return new
+				{
+					hit = tr.Hit,
+					distance = tr.Distance,
+					hitPosition = new { x = tr.EndPosition.x, y = tr.EndPosition.y, z = tr.EndPosition.z },
+					normal = new { x = tr.Normal.x, y = tr.Normal.y, z = tr.Normal.z },
+					hitGameObjectId = tr.GameObject.IsValid() ? tr.GameObject.Id.ToString() : null,
+					hitGameObjectName = tr.GameObject.IsValid() ? tr.GameObject.Name : null
+				};
+			}
+			catch ( Exception e )
+			{
+				return new { error = $"Raycast failed: {e.Message}" };
+			}
+		}, new { type = "object", properties = new { startX = new { type = "number" }, startY = new { type = "number" }, startZ = new { type = "number" }, endX = new { type = "number" }, endY = new { type = "number" }, endZ = new { type = "number" } }, required = new[] { "startX", "startY", "startZ", "endX", "endY", "endZ" } }, annotations: new { readOnlyHint = true } );
+
+		RegisterTool( "sbox_apply_physics_impulse", "Apply a force impulse to a GameObject's Rigidbody.", args =>
+		{
+			var idStr = args.GetProperty( "id" ).GetString();
+			var forceVal = args.GetProperty( "force" );
+
+			var scene = Game.ActiveScene;
+			if ( scene == null ) return new { error = "No active scene" };
+			if ( !Guid.TryParse( idStr, out var guid ) ) return new { error = "Invalid GUID format" };
+			var go = scene.Directory.FindByGuid( guid );
+			if ( go == null ) return new { error = "GameObject not found" };
+
+			var rb = go.Components.Get<Rigidbody>();
+			if ( !rb.IsValid() ) return new { error = "No Rigidbody component found on this GameObject" };
+
+			try
+			{
+				var forceVec = (Vector3)McpBridge.Tools.AssetTools.ConvertValue( forceVal, typeof( Vector3 ) );
+				rb.ApplyImpulse( forceVec );
+				return new { success = true, id = idStr, gameObjectName = go.Name, appliedImpulse = forceVec.ToString() };
+			}
+			catch ( Exception e )
+			{
+				return new { error = $"Failed to apply impulse: {e.Message}" };
+			}
+		}, new { type = "object", properties = new { id = new { type = "string", description = "GUID of the GameObject" }, force = new { type = "string", description = "Force vector as 'x,y,z' or JSON object" } }, required = new[] { "id", "force" } }, annotations: new { destructiveHint = true } );
 	}
 
 	// ── Accept loop ────────────────────────────────────────────────
@@ -1113,7 +1936,7 @@ public static class McpEditorServer
 				var progressToken = "";
 				if ( p.TryGetProperty( "_meta", out var meta ) && meta.TryGetProperty( "progressToken", out var pt ) )
 					progressToken = pt.GetString() ?? "";
-				McpToolBridge.CurrentProgressToken.Value = progressToken;
+				McpToolBridge.CurrentProgressToken = progressToken;
 
 				// Get session cancellation token
 				var toolCts = CancellationTokenSource.CreateLinkedTokenSource( _cts.Token );
@@ -1283,15 +2106,121 @@ public static class McpEditorServer
 	{
 		var scene = Game.ActiveScene;
 		if ( scene == null ) return new { error = "No active scene" };
-		var gm = scene.GetAllComponents<BlackFridayGameManager>().FirstOrDefault();
-		var quota = scene.GetAllComponents<QuotaManager>().FirstOrDefault();
-		var alarm = scene.GetAllComponents<AlarmSystem>().FirstOrDefault();
+		
+		var gm = GetDynamicComponent( "BlackFridayGameManager" );
+		var quota = GetDynamicComponent( "QuotaManager" );
+		var alarm = GetDynamicComponent( "AlarmSystem" );
+		
+		object phaseData = null;
+		if ( gm != null )
+		{
+			var day = GetPropValue<int>( gm, "CurrentDay" );
+			var phaseStr = GetPropValue<string>( gm, "CurrentPhase" );
+			var timeRemaining = Math.Round( GetPropValue<double>( gm, "PhaseTimeRemaining" ), 1 );
+			var progress = Math.Round( InvokeDoubleMethod( gm, "GetPhaseProgress" ), 2 );
+			phaseData = new { day, phase = phaseStr, timeRemaining, progress };
+		}
+		
+		object economyData = null;
+		if ( quota != null )
+		{
+			var personalCash = Math.Round( GetPropValue<double>( quota, "MyPersonalCash" ), 1 );
+			var personalQuota = Math.Round( GetPropValue<double>( quota, "PersonalQuota" ), 1 );
+			var poolCurrent = Math.Round( GetPropValue<double>( quota, "SharedPoolCurrent" ), 1 );
+			var poolTarget = Math.Round( GetPropValue<double>( quota, "SharedPoolTarget" ), 1 );
+			economyData = new { personalCash, personalQuota, poolCurrent, poolTarget };
+		}
+		
+		object alarmData = null;
+		if ( alarm != null )
+		{
+			var level = InvokeStringMethod( alarm, "GetAlarmLevelName" );
+			var progress = Math.Round( GetPropValue<double>( alarm, "AlarmProgress" ), 1 );
+			alarmData = new { level, progress };
+		}
+		
 		return new
 		{
-			phase = gm != null ? new { day = gm.CurrentDay, phase = gm.CurrentPhase.ToString(), timeRemaining = Math.Round( gm.PhaseTimeRemaining, 1 ), progress = Math.Round( gm.GetPhaseProgress(), 2 ) } : null,
-			economy = quota != null ? new { personalCash = Math.Round( quota.MyPersonalCash, 1 ), personalQuota = Math.Round( quota.PersonalQuota, 1 ), poolCurrent = Math.Round( quota.SharedPoolCurrent, 1 ), poolTarget = Math.Round( quota.SharedPoolTarget, 1 ) } : null,
-			alarm = alarm != null ? new { level = alarm.GetAlarmLevelName(), progress = Math.Round( alarm.AlarmProgress, 1 ) } : null
+			phase = phaseData,
+			economy = economyData,
+			alarm = alarmData
 		};
+	}
+
+	private static object GetDynamicComponent( string typeName )
+	{
+		var scene = Game.ActiveScene;
+		if ( scene == null ) return null;
+		
+		var typeDesc = McpBridge.Tools.AssetTools.FindComponentType( typeName );
+		if ( typeDesc == null ) return null;
+		
+		foreach ( var go in scene.GetAllObjects( true ) )
+		{
+			var comp = go.Components.Get( typeDesc.TargetType );
+			if ( comp.IsValid() )
+			{
+				return comp;
+			}
+		}
+		return null;
+	}
+
+	private static T GetPropValue<T>( object obj, string propName, T defaultValue = default )
+	{
+		if ( obj == null ) return defaultValue;
+		var prop = obj.GetType().GetProperty( propName );
+		if ( prop != null )
+		{
+			try
+			{
+				var val = prop.GetValue( obj );
+				if ( val != null )
+				{
+					if ( typeof(T) == typeof(string) )
+					{
+						return (T)(object)val.ToString();
+					}
+					return (T)Convert.ChangeType( val, typeof(T) );
+				}
+			}
+			catch { }
+		}
+		return defaultValue;
+	}
+
+	private static double InvokeDoubleMethod( object obj, string methodName, double defaultValue = 0.0 )
+	{
+		if ( obj == null ) return defaultValue;
+		var method = obj.GetType().GetMethod( methodName, Array.Empty<Type>() );
+		if ( method != null )
+		{
+			try
+			{
+				var val = method.Invoke( obj, null );
+				if ( val != null )
+				{
+					return Convert.ToDouble( val );
+				}
+			}
+			catch { }
+		}
+		return defaultValue;
+	}
+
+	private static string InvokeStringMethod( object obj, string methodName, string defaultValue = "" )
+	{
+		if ( obj == null ) return defaultValue;
+		var method = obj.GetType().GetMethod( methodName, Array.Empty<Type>() );
+		if ( method != null )
+		{
+			try
+			{
+				return method.Invoke( obj, null )?.ToString() ?? defaultValue;
+			}
+			catch { }
+		}
+		return defaultValue;
 	}
 
 	private static List<string> ListAssetsByExt( params string[] exts )
@@ -1543,6 +2472,93 @@ public static class McpEditorServer
 				if ( kv.Value.Cts.IsCancellationRequested )
 					_sessions.TryRemove( kv.Key, out _ );
 			}
+		}
+	}
+
+	private static object BuildSceneNode( GameObject go )
+	{
+		var components = new List<string>();
+		foreach ( var c in go.Components.GetAll<Component>() )
+		{
+			try { components.Add( c.GetType().Name ); } catch { }
+		}
+
+		var children = new List<object>();
+		foreach ( var child in go.Children )
+		{
+			if ( child.IsValid() )
+			{
+				children.Add( BuildSceneNode( child ) );
+			}
+		}
+
+		return new
+		{
+			id = go.Id.ToString(),
+			name = go.Name ?? "",
+			position = new { x = go.WorldPosition.x, y = go.WorldPosition.y, z = go.WorldPosition.z },
+			components,
+			children
+		};
+	}
+
+	private static object ParseBuildMessage( string line, string type )
+	{
+		try
+		{
+			var colonIdx = line.IndexOf( "): " );
+			if ( colonIdx == -1 ) return null;
+			
+			var filePart = line.Substring( 0, colonIdx + 1 );
+			var restPart = line.Substring( colonIdx + 3 );
+			
+			var openParen = filePart.LastIndexOf( '(' );
+			if ( openParen == -1 ) return null;
+			
+			var filePath = filePart.Substring( 0, openParen ).Trim();
+			var posStr = filePart.Substring( openParen + 1, filePart.Length - openParen - 2 );
+			
+			int lineNum = 1;
+			int colNum = 1;
+			var posParts = posStr.Split( ',' );
+			if ( posParts.Length >= 1 ) int.TryParse( posParts[0], out lineNum );
+			if ( posParts.Length >= 2 ) int.TryParse( posParts[1], out colNum );
+			
+			var typePrefix = $"{type} ";
+			if ( restPart.StartsWith( typePrefix, StringComparison.OrdinalIgnoreCase ) )
+			{
+				restPart = restPart.Substring( typePrefix.Length );
+			}
+			
+			var code = "";
+			var message = restPart;
+			
+			var codeColon = restPart.IndexOf( ':' );
+			if ( codeColon != -1 )
+			{
+				code = restPart.Substring( 0, codeColon ).Trim();
+				message = restPart.Substring( codeColon + 1 ).Trim();
+			}
+			
+			var projectBracket = message.LastIndexOf( '[' );
+			if ( projectBracket != -1 )
+			{
+				message = message.Substring( 0, projectBracket ).Trim();
+			}
+			
+			return new
+			{
+				type,
+				file = filePath,
+				line = lineNum,
+				column = colNum,
+				code,
+				message
+			};
+		}
+		catch
+		{
+			return new { type, raw = line };
 		}
 	}
 }

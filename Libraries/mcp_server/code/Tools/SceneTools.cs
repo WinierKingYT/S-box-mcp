@@ -219,6 +219,8 @@ public class SceneTools
 	[McpTool("sbox_remove_logic_rule", "Removes a Logic Weaver rule by ID.", DestructiveHint = true)] public object RemoveLogicRule( string ruleId ) { var r = LogicWeaver.RemoveRule( ruleId ); return r ? new { success = true } : new { error = $"Rule not found: {ruleId}" }; }
 	[McpTool("sbox_list_logic_rules", "Lists all Logic Weaver rules.", ReadOnlyHint = true)] public object ListLogicRules() { var rules = LogicWeaver.ListRules().Select( r => new { id = r.Id, triggerType = r.TriggerType, sourceGuid = r.SourceGuid, actionType = r.ActionType, targetGuid = r.TargetGuid, actionParams = r.ActionParams, enabled = r.Enabled } ).ToList(); return new { rules, count = rules.Count }; }
 	[McpTool("sbox_clear_logic_rules", "Clears all Logic Weaver rules.", DestructiveHint = true)] public object ClearLogicRules() { LogicWeaver.Clear(); return new { success = true }; }
+	[McpTool("sbox_fire_logic_trigger", "Fires a trigger event on the Logic Weaver rules.", DestructiveHint = true)] public object FireLogicTrigger( string triggerType, string sourceGuid ) { LogicWeaver.Fire( triggerType, sourceGuid ); return new { success = true, triggerType, sourceGuid }; }
+
 
 	[McpTool("sbox_navmesh_find_path", "Finds a path between two points on the navmesh.", ReadOnlyHint = true)]
 	public object NavMeshFindPath( float fx, float fy, float fz, float tx, float ty, float tz )

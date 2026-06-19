@@ -135,4 +135,14 @@ public class UITools
 			return new { error = $"Failed to set text: {e.Message}" };
 		}
 	}
+
+	[McpTool("sbox_show_toast", "Displays a toast notification on the player's screen.", OptionalParams = new[]{"type", "duration"}, DestructiveHint = true)]
+	public object ShowToast( string message, string type = "info", float duration = 4.0f )
+	{
+		if ( Sandbox.McpBridgeComponent.Instance == null )
+			return new { error = "MCP Bridge Component is not active in the scene" };
+
+		Sandbox.McpBridgeComponent.ShowToast( message, type, duration );
+		return new { success = true, message, type, duration };
+	}
 }

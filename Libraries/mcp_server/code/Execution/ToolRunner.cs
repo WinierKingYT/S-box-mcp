@@ -42,7 +42,7 @@ public class ToolRunner
 
 			// Extract progress token from _meta.progressToken
 			if ( doc.RootElement.TryGetProperty( "_meta", out var metaEl ) && metaEl.TryGetProperty( "progressToken", out var ptEl ) )
-				McpToolBridge.CurrentProgressToken.Value = ptEl.GetString() ?? "";
+				McpToolBridge.CurrentProgressToken = ptEl.GetString() ?? "";
 
 			if ( rpcMethod != "initialize" && rpcMethod != "ping" && !rpcMethod.StartsWith( "notifications/" ) )
 			{
@@ -109,7 +109,10 @@ public class ToolRunner
 			{
 				var timeoutTcs = new TaskCompletionSource<object>();
 				_ = DelayAndComplete( timeoutTcs, toolTimeoutMs );
-				await Task.WhenAny( task, timeoutTcs.Task );
+				while ( !task.IsCompleted && !timeoutTcs.Task.IsCompleted )
+				{
+					await GameTask.Delay( 10 );
+				}
 			}
 			if ( !task.IsCompleted )
 			{

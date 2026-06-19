@@ -266,4 +266,275 @@ public class AssetTools
 			children
 		};
 	}
+
+	[McpTool("sbox_asset_import_json", "Imports a GameObject hierarchy from a JSON string. Recreates child GameObjects, attaches components, and parses properties.", DestructiveHint = true)]
+	public object ImportJson( string json, string parentGuidStr = null )
+	{
+		var scene = Game.ActiveScene;
+		if ( scene == null ) return new { error = "No active scene" };
+
+		GameObject parentGo = null;
+		if ( !string.IsNullOrEmpty( parentGuidStr ) && Guid.TryParse( parentGuidStr, out var parentGuid ) )
+		{
+			parentGo = scene.Directory.FindByGuid( parentGuid );
+		}
+
+		try
+		{
+			using var doc = JsonDocument.Parse( json );
+			var root = doc.RootElement;
+			var createdGo = DeserializeGameObject( root, scene, parentGo );
+			if ( createdGo == null ) return new { error = "Failed to deserialize GameObject" };
+			return new { success = true, id = createdGo.Id.ToString(), name = createdGo.Name };
+		}
+		catch ( Exception e )
+		{
+			return new { error = $"Import failed: {e.Message}" };
+		}
+	}
+
+	private static GameObject DeserializeGameObject( JsonElement el, Scene scene, GameObject parent )
+	{
+		var name = el.TryGetProperty( "name", out var np ) ? np.GetString() : "Imported Object";
+		var go = new GameObject( true, name );
+		if ( parent != null )
+		{
+			go.SetParent( parent );
+		}
+		else
+		{
+			go.SetParent( scene );
+		}
+
+		// Set position
+		if ( el.TryGetProperty( "position", out var posEl ) )
+		{
+			var px = posEl.TryGetProperty( "x", out var x ) ? x.GetSingle() : 0f;
+			var py = posEl.TryGetProperty( "y", out var y ) ? y.GetSingle() : 0f;
+			var pz = posEl.TryGetProperty( "z", out var z ) ? z.GetSingle() : 0f;
+			go.WorldPosition = new Vector3( px, py, pz );
+		}
+
+		// Set rotation
+		if ( el.TryGetProperty( "rotation", out var rotEl ) )
+		{
+			var pitch = rotEl.TryGetProperty( "pitch", out var p ) ? p.GetSingle() : 0f;
+			var yaw = rotEl.TryGetProperty( "yaw", out var y ) ? y.GetSingle() : 0f;
+			var roll = rotEl.TryGetProperty( "roll", out var r ) ? r.GetSingle() : 0f;
+			go.WorldRotation = new Angles( pitch, yaw, roll ).ToRotation();
+		}
+
+		// Set scale
+		if ( el.TryGetProperty( "scale", out var scaleEl ) )
+		{
+			if ( scaleEl.ValueKind == JsonValueKind.Number )
+			{
+				go.LocalScale = new Vector3( scaleEl.GetSingle() );
+			}
+			else if ( scaleEl.ValueKind == JsonValueKind.Object )
+			{
+				var sx = scaleEl.TryGetProperty( "x", out var x ) ? x.GetSingle() : 1f;
+				var sy = scaleEl.TryGetProperty( "y", out var y ) ? y.GetSingle() : 1f;
+				var sz = scaleEl.TryGetProperty( "z", out var z ) ? z.GetSingle() : 1f;
+				go.LocalScale = new Vector3( sx, sy, sz );
+			}
+		}
+
+		// Deserialize Components
+		if ( el.TryGetProperty( "components", out var compsEl ) && compsEl.ValueKind == JsonValueKind.Array )
+		{
+			foreach ( var compEl in compsEl.EnumerateArray() )
+			{
+				var typeName = compEl.TryGetProperty( "type", out var t ) ? t.GetString() : null;
+				if ( string.IsNullOrEmpty( typeName ) || typeName == "unknown" ) continue;
+
+				var typeDesc = FindComponentType( typeName );
+				if ( typeDesc == null ) continue;
+
+				var existingComp = go.Components.Get( typeDesc.TargetType );
+				var comp = existingComp.IsValid() ? existingComp : go.Components.Create( typeDesc );
+
+				if ( comp.IsValid() )
+				{
+					foreach ( var prop in typeDesc.Properties )
+					{
+						if ( !prop.CanWrite || prop.Name == "Type" ) continue;
+						if ( compEl.TryGetProperty( prop.Name, out var valEl ) )
+						{
+							try
+							{
+								var converted = ConvertValue( valEl, prop.PropertyType );
+								if ( converted != null )
+								{
+									prop.SetValue( comp, converted );
+								}
+							}
+							catch { }
+						}
+					}
+				}
+			}
+		}
+
+		// Deserialize Children
+		if ( el.TryGetProperty( "children", out var childrenEl ) && childrenEl.ValueKind == JsonValueKind.Array )
+		{
+			foreach ( var childEl in childrenEl.EnumerateArray() )
+			{
+				DeserializeGameObject( childEl, scene, go );
+			}
+		}
+
+		return go;
+	}
+
+	public static TypeDescription FindComponentType( string name )
+	{
+		var types = TypeLibrary.GetTypes<Component>();
+		foreach ( var t in types )
+		{
+			if ( string.Equals( t.Name, name, StringComparison.OrdinalIgnoreCase ) || string.Equals( t.FullName, name, StringComparison.OrdinalIgnoreCase ) ) return t;
+		}
+		foreach ( var t in types )
+		{
+			if ( t.Name.IndexOf( name, StringComparison.OrdinalIgnoreCase ) >= 0 ) return t;
+		}
+		return null;
+	}
+
+	public static object ConvertValue( JsonElement element, Type targetType )
+	{
+		if ( element.ValueKind == JsonValueKind.Null ) return null;
+
+		if ( targetType == typeof( string ) )
+			return element.GetString();
+
+		if ( targetType == typeof( int ) || targetType == typeof( int? ) )
+		{
+			if ( element.ValueKind == JsonValueKind.Number ) return element.GetInt32();
+			if ( element.ValueKind == JsonValueKind.String && int.TryParse( element.GetString(), out var val ) ) return val;
+			return null;
+		}
+
+		if ( targetType == typeof( float ) || targetType == typeof( float? ) )
+		{
+			if ( element.ValueKind == JsonValueKind.Number ) return element.GetSingle();
+			if ( element.ValueKind == JsonValueKind.String && float.TryParse( element.GetString(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var val ) ) return val;
+			return null;
+		}
+
+		if ( targetType == typeof( double ) || targetType == typeof( double? ) )
+		{
+			if ( element.ValueKind == JsonValueKind.Number ) return element.GetDouble();
+			if ( element.ValueKind == JsonValueKind.String && double.TryParse( element.GetString(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var val ) ) return val;
+			return null;
+		}
+
+		if ( targetType == typeof( bool ) || targetType == typeof( bool? ) )
+		{
+			if ( element.ValueKind == JsonValueKind.True ) return true;
+			if ( element.ValueKind == JsonValueKind.False ) return false;
+			if ( element.ValueKind == JsonValueKind.String && bool.TryParse( element.GetString(), out var val ) ) return val;
+			return null;
+		}
+
+		if ( targetType == typeof( Guid ) || targetType == typeof( Guid? ) )
+		{
+			if ( element.ValueKind == JsonValueKind.String && Guid.TryParse( element.GetString(), out var g ) ) return g;
+			return null;
+		}
+
+		if ( targetType == typeof( Vector3 ) || targetType == typeof( Vector3? ) )
+		{
+			if ( element.ValueKind == JsonValueKind.Object )
+			{
+				var x = element.TryGetProperty( "x", out var xp ) ? xp.GetSingle() : 0f;
+				var y = element.TryGetProperty( "y", out var yp ) ? yp.GetSingle() : 0f;
+				var z = element.TryGetProperty( "z", out var zp ) ? zp.GetSingle() : 0f;
+				return new Vector3( x, y, z );
+			}
+			if ( element.ValueKind == JsonValueKind.String )
+			{
+				var parts = element.GetString().Split( ',' );
+				if ( parts.Length == 3 &&
+					 float.TryParse( parts[0], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var x ) &&
+					 float.TryParse( parts[1], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var y ) &&
+					 float.TryParse( parts[2], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var z ) )
+				{
+					return new Vector3( x, y, z );
+				}
+			}
+			return Vector3.Zero;
+		}
+
+		if ( targetType == typeof( Rotation ) || targetType == typeof( Rotation? ) )
+		{
+			if ( element.ValueKind == JsonValueKind.Object )
+			{
+				var pitch = element.TryGetProperty( "pitch", out var pp ) ? pp.GetSingle() : 0f;
+				var yaw = element.TryGetProperty( "yaw", out var yp ) ? yp.GetSingle() : 0f;
+				var roll = element.TryGetProperty( "roll", out var rp ) ? rp.GetSingle() : 0f;
+				return Rotation.From( pitch, yaw, roll );
+			}
+			return Rotation.Identity;
+		}
+
+		if ( targetType == typeof( Angles ) || targetType == typeof( Angles? ) )
+		{
+			if ( element.ValueKind == JsonValueKind.Object )
+			{
+				var pitch = element.TryGetProperty( "pitch", out var pp ) ? pp.GetSingle() : 0f;
+				var yaw = element.TryGetProperty( "yaw", out var yp ) ? yp.GetSingle() : 0f;
+				var roll = element.TryGetProperty( "roll", out var rp ) ? rp.GetSingle() : 0f;
+				return new Angles( pitch, yaw, roll );
+			}
+			if ( element.ValueKind == JsonValueKind.String )
+			{
+				var parts = element.GetString().Split( ',' );
+				if ( parts.Length == 3 &&
+					 float.TryParse( parts[0], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var p ) &&
+					 float.TryParse( parts[1], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var y ) &&
+					 float.TryParse( parts[2], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var r ) )
+				{
+					return new Angles( p, y, r );
+				}
+			}
+			return Angles.Zero;
+		}
+
+		if ( targetType == typeof( Color ) || targetType == typeof( Color? ) )
+		{
+			if ( element.ValueKind == JsonValueKind.String )
+			{
+				var str = element.GetString();
+				if ( !string.IsNullOrEmpty( str ) && Color.TryParse( str, out var color ) )
+					return color;
+			}
+			return Color.White;
+		}
+
+		if ( targetType.IsEnum )
+		{
+			if ( element.ValueKind == JsonValueKind.String )
+			{
+				var str = element.GetString();
+				if ( !string.IsNullOrEmpty( str ) && Enum.TryParse( targetType, str, true, out var result ) )
+					return result;
+			}
+			else if ( element.ValueKind == JsonValueKind.Number )
+			{
+				return Enum.ToObject( targetType, element.GetInt32() );
+			}
+			return null;
+		}
+
+		try
+		{
+			return JsonSerializer.Deserialize( element.GetRawText(), targetType );
+		}
+		catch
+		{
+			return null;
+		}
+	}
 }

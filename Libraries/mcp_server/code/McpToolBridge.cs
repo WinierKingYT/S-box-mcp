@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using Sandbox;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -23,7 +24,6 @@ public sealed record BridgeRegistration(
 public static class McpToolBridge
 {
 	private static readonly List<BridgeRegistration> _bridges = new();
-	private static volatile BridgeRegistration[] _snapshot = Array.Empty<BridgeRegistration>();
 	private static readonly ConcurrentDictionary<string, byte> _globalToolNames = new();
 	private static readonly ConcurrentDictionary<string, int> _bridgeErrors = new();
 	private static readonly ConcurrentDictionary<string, string> _prefixOwners = new();
@@ -45,13 +45,12 @@ public static class McpToolBridge
 		{
 			_bridges.RemoveAll( b => b.Name == reg.Name );
 			_bridges.Add( reg );
-			_snapshot = _bridges.ToArray();
 
 			// Detect and warn on prefix conflicts
 			if ( !string.IsNullOrEmpty( reg.ToolPrefix ) )
 			{
 				if ( _prefixOwners.TryGetValue( reg.ToolPrefix, out var owner ) && owner != reg.Name )
-					Console.Error.WriteLine( $"[MCP] WARNING: Bridge '{reg.Name}' claims tool prefix '{reg.ToolPrefix}' already owned by '{owner}'" );
+					Log.Warning( $"[MCP] WARNING: Bridge '{reg.Name}' claims tool prefix '{reg.ToolPrefix}' already owned by '{owner}'" );
 				_prefixOwners[reg.ToolPrefix] = reg.Name;
 			}
 		}
@@ -63,7 +62,6 @@ public static class McpToolBridge
 		lock ( _bridges )
 		{
 			_bridges.RemoveAll( b => b.Name == name );
-			_snapshot = _bridges.ToArray();
 
 			// Clean up prefix ownership
 			var keys = _prefixOwners.Where( kv => kv.Value == name ).Select( kv => kv.Key ).ToList();
@@ -75,7 +73,7 @@ public static class McpToolBridge
 
 	public static event Action OnToolsChanged;
 
-	public static readonly AsyncLocal<string> CurrentProgressToken = new();
+	public static string CurrentProgressToken { get; set; } = "";
 	public static event Action<double, double?, string> OnProgress;
 
 	public static void ReportProgress( double progress, double? total = null, string message = null )
@@ -105,8 +103,7 @@ public static class McpToolBridge
 
 	private static void DecayBridgeErrors()
 	{
-		if ( !Monitor.TryEnter( _decayLock ) ) return;
-		try
+		lock ( _decayLock )
 		{
 			var cutoff = DateTime.UtcNow - BridgeErrorDecayInterval;
 			foreach ( var kv in _bridgeErrorTimestamps.ToArray() )
@@ -125,7 +122,6 @@ public static class McpToolBridge
 				}
 			}
 		}
-		finally { Monitor.Exit( _decayLock ); }
 	}
 
 	private static bool IsBridgeBlacklisted( string name ) => _bridgeErrors.TryGetValue( name, out var count ) && count >= MaxBridgeErrors;
@@ -133,7 +129,11 @@ public static class McpToolBridge
 	public static async Task<string> RouteToolRequest( string method, string args )
 	{
 		DecayBridgeErrors();
-		var snapshot = _snapshot.OrderByDescending( b => b.Priority ).ThenBy( b => b.Name ).ToArray();
+		BridgeRegistration[] snapshot;
+		lock ( _bridges )
+		{
+			snapshot = _bridges.OrderByDescending( b => b.Priority ).ThenBy( b => b.Name ).ToArray();
+		}
 
 		// Phase 1: Try prefix-matched bridges first
 		foreach ( var b in snapshot )
@@ -186,7 +186,12 @@ public static class McpToolBridge
 	public static async Task<string> ListAllGameTools()
 	{
 		var allTools = new List<object>();
-		foreach ( var b in _snapshot )
+		BridgeRegistration[] snapshot;
+		lock ( _bridges )
+		{
+			snapshot = _bridges.ToArray();
+		}
+		foreach ( var b in snapshot )
 		{
 			if ( b.OnListGameTools != null )
 			{
@@ -208,7 +213,12 @@ public static class McpToolBridge
 
 	public static async Task<string> GetAnyStateSnapshot()
 	{
-		foreach ( var b in _snapshot )
+		BridgeRegistration[] snapshot;
+		lock ( _bridges )
+		{
+			snapshot = _bridges.ToArray();
+		}
+		foreach ( var b in snapshot )
 		{
 			if ( b.OnStateSnapshot != null )
 			{
