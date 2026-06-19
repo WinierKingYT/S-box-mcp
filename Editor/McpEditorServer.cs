@@ -45,6 +45,22 @@ public static class McpEditorServer
 	private static volatile string _defaultLogLevel = "info";
 	private static readonly DateTime _startTime = DateTime.UtcNow;
 
+	// ── Tool result cache (TTL-based) ─────────────────────────────────────
+	private record CacheEntry( object Result, DateTime ExpiresAt );
+	private static readonly ConcurrentDictionary<string, CacheEntry> _toolCache = new();
+	private static readonly HashSet<string> _cacheableTools = new()
+	{
+		"sbox_list_component_types", "sbox_get_scene_hierarchy", "sbox_scene_list"
+	};
+	private const double DefaultCacheTtlSeconds = 2.0;
+
+	// ── Property watch registry ───────────────────────────────────────────
+	private record WatchEntry( string GameObjectId, string ComponentType, string PropertyName );
+	private static readonly ConcurrentDictionary<string, (WatchEntry Watch, string LastValue)> _watchedProperties = new();
+
+	// ── Per-session rate limit (requests / minute) ────────────────────────
+	private const int DefaultRateLimit = 120;
+
 	public static bool IsRunning => _listener != null;
 	public static int Port => _port;
 	public static string ApiKey => _apiKey;
@@ -1262,9 +1278,419 @@ public sealed class {className} : Component
 				return new { error = $"Failed to apply impulse: {e.Message}" };
 			}
 		}, new { type = "object", properties = new { id = new { type = "string", description = "GUID of the GameObject" }, force = new { type = "string", description = "Force vector as 'x,y,z' or JSON object" } }, required = new[] { "id", "force" } }, annotations: new { destructiveHint = true } );
+		// ════════════════════════════════════════════════════════════════════
+		// KATEGORİ 1 — Yeni Sahne Araçları
+		// ════════════════════════════════════════════════════════════════════
+
+		RegisterTool( "sbox_duplicate_gameobject", "Duplicate a GameObject in the scene by GUID.", args =>
+		{
+			var idStr  = args.GetProperty( "id" ).GetString();
+			var newName = args.TryGetProperty( "name", out var np ) ? np.GetString() : null;
+			var scene  = Game.ActiveScene;
+			if ( scene == null ) return new { error = "No active scene" };
+			if ( !Guid.TryParse( idStr, out var guid ) ) return new { error = "Invalid GUID" };
+			var go = scene.Directory.FindByGuid( guid );
+			if ( !go.IsValid() ) return new { error = "GameObject not found" };
+			var clone = go.Clone();
+			if ( !string.IsNullOrEmpty( newName ) ) clone.Name = newName;
+			return new { success = true, originalId = idStr, newId = clone.Id.ToString(), name = clone.Name };
+		}, new { type = "object", properties = new { id = new { type = "string", description = "Source GameObject GUID" }, name = new { type = "string", description = "Optional name for the clone" } }, required = new[] { "id" } } );
+
+		RegisterTool( "sbox_rename_gameobject", "Rename a GameObject in the scene by GUID.", args =>
+		{
+			var idStr   = args.GetProperty( "id" ).GetString();
+			var newName = args.GetProperty( "name" ).GetString();
+			var scene   = Game.ActiveScene;
+			if ( scene == null ) return new { error = "No active scene" };
+			if ( !Guid.TryParse( idStr, out var guid ) ) return new { error = "Invalid GUID" };
+			var go = scene.Directory.FindByGuid( guid );
+			if ( !go.IsValid() ) return new { error = "GameObject not found" };
+			var oldName = go.Name;
+			go.Name = newName;
+			return new { success = true, id = idStr, oldName, newName };
+		}, new { type = "object", properties = new { id = new { type = "string", description = "GameObject GUID" }, name = new { type = "string", description = "New name" } }, required = new[] { "id", "name" } } );
+
+		RegisterTool( "sbox_set_parent", "Set the parent of a GameObject. Pass null parentId to move to scene root.", args =>
+		{
+			var idStr       = args.GetProperty( "id" ).GetString();
+			var parentIdStr = args.TryGetProperty( "parentId", out var pp ) ? pp.GetString() : null;
+			var scene = Game.ActiveScene;
+			if ( scene == null ) return new { error = "No active scene" };
+			if ( !Guid.TryParse( idStr, out var guid ) ) return new { error = "Invalid child GUID" };
+			var go = scene.Directory.FindByGuid( guid );
+			if ( !go.IsValid() ) return new { error = "Child GameObject not found" };
+
+			if ( string.IsNullOrEmpty( parentIdStr ) || parentIdStr == "null" )
+			{
+				go.Parent = null;
+				return new { success = true, id = idStr, name = go.Name, newParent = (string)null };
+			}
+
+			if ( !Guid.TryParse( parentIdStr, out var parentGuid ) ) return new { error = "Invalid parent GUID" };
+			var parent = scene.Directory.FindByGuid( parentGuid );
+			if ( !parent.IsValid() ) return new { error = "Parent GameObject not found" };
+			go.Parent = parent;
+			return new { success = true, id = idStr, name = go.Name, newParent = parent.Name, newParentId = parentIdStr };
+		}, new { type = "object", properties = new { id = new { type = "string", description = "Child GameObject GUID" }, parentId = new { type = "string", description = "Parent GUID, or null for scene root" } }, required = new[] { "id" } } );
+
+		// ════════════════════════════════════════════════════════════════════
+		// KATEGORİ 1 — Dosya Okuma / Yazma
+		// ════════════════════════════════════════════════════════════════════
+
+		RegisterTool( "sbox_read_file", "Read any file from the project directory. Returns text content.", args =>
+		{
+			var relPath = args.GetProperty( "path" ).GetString()?.Replace( "\\", "/" ) ?? "";
+			try
+			{
+				string text = null;
+				if ( FileSystem.Mounted.FileExists( relPath ) )
+				{
+					text = FileSystem.Mounted.ReadAllText( relPath );
+				}
+				else
+				{
+					var absPath = System.IO.Path.Combine( FileSystem.Mounted.GetFullPath( "." ), relPath.Replace( "/", System.IO.Path.DirectorySeparatorChar.ToString() ) );
+					if ( !System.IO.File.Exists( absPath ) ) return new { error = $"File not found: {relPath}" };
+					text = System.IO.File.ReadAllText( absPath );
+				}
+				var lines = text.Split( '\n' );
+				var maxLines = args.TryGetProperty( "maxLines", out var ml ) ? ml.GetInt32() : 300;
+				var truncated = lines.Length > maxLines;
+				var preview = string.Join( "\n", lines.Take( maxLines ) );
+				return new { path = relPath, lineCount = lines.Length, sizeBytes = text.Length, truncated, content = preview };
+			}
+			catch ( Exception e ) { return new { error = e.Message }; }
+		}, new { type = "object", properties = new { path = new { type = "string", description = "Relative file path e.g. Code/Core/MyScript.cs" }, maxLines = new { type = "integer", description = "Max lines to return (default 300)" } }, required = new[] { "path" } } );
+
+		RegisterTool( "sbox_write_file", "Write or create a file in the project. Path is relative to the project root.", args =>
+		{
+			var relPath = args.GetProperty( "path" ).GetString()?.Replace( "/", System.IO.Path.DirectorySeparatorChar.ToString() ) ?? "";
+			var content = args.GetProperty( "content" ).GetString() ?? "";
+			if ( relPath.Contains( ".." ) ) return new { error = "Path traversal not allowed" };
+			try
+			{
+				var absPath = System.IO.Path.Combine( FileSystem.Mounted.GetFullPath( "." ), relPath );
+				var dirPath = System.IO.Path.GetDirectoryName( absPath );
+				if ( !string.IsNullOrEmpty( dirPath ) ) System.IO.Directory.CreateDirectory( dirPath );
+				System.IO.File.WriteAllText( absPath, content );
+				return new { success = true, path = relPath, absPath, sizeBytes = content.Length };
+			}
+			catch ( Exception e ) { return new { error = e.Message }; }
+		}, new { type = "object", properties = new { path = new { type = "string", description = "Relative path to write, e.g. Code/MyScript.cs" }, content = new { type = "string", description = "Full file content to write" } }, required = new[] { "path", "content" } }, annotations: new { destructiveHint = true } );
+
+		// ════════════════════════════════════════════════════════════════════
+		// KATEGORİ 2 — Kod Okuma / Patch
+		// ════════════════════════════════════════════════════════════════════
+
+		RegisterTool( "sbox_read_script", "Read a C# script file with line numbers and a class/method outline.", args =>
+		{
+			var relPath = args.GetProperty( "path" ).GetString()?.Replace( "\\", "/" ) ?? "";
+			try
+			{
+				string text = null;
+				if ( FileSystem.Mounted.FileExists( relPath ) )
+				{
+					text = FileSystem.Mounted.ReadAllText( relPath );
+				}
+				else
+				{
+					var absPath = System.IO.Path.Combine( FileSystem.Mounted.GetFullPath( "." ), relPath.Replace( "/", System.IO.Path.DirectorySeparatorChar.ToString() ) );
+					if ( !System.IO.File.Exists( absPath ) ) return new { error = $"File not found: {relPath}" };
+					text = System.IO.File.ReadAllText( absPath );
+				}
+				var path = relPath;
+
+				var lines     = text.Split( '\n' );
+				var maxLines  = args.TryGetProperty( "maxLines", out var ml ) ? ml.GetInt32() : 300;
+				var startLine = args.TryGetProperty( "startLine", out var sl ) ? sl.GetInt32() - 1 : 0;
+				startLine = Math.Max( 0, Math.Min( startLine, lines.Length - 1 ) );
+				var endLine = Math.Min( startLine + maxLines, lines.Length );
+
+				// Build numbered snippet
+				var sb = new System.Text.StringBuilder();
+				for ( int i = startLine; i < endLine; i++ )
+					sb.AppendLine( $"{i + 1,4}: {lines[i]}" );
+
+				// Quick outline: find class/method/property declarations
+				var outline = new List<string>();
+				for ( int i = 0; i < lines.Length; i++ )
+				{
+					var t = lines[i].Trim();
+					if ( t.StartsWith( "public " ) || t.StartsWith( "private " ) || t.StartsWith( "protected " ) || t.StartsWith( "internal " ) )
+					{
+						if ( t.Contains( " class " ) || t.Contains( " void " ) || t.Contains( " Task " ) || t.Contains( " async " ) || t.Contains( " bool " ) || t.Contains( " int " ) || t.Contains( " float " ) || t.Contains( " string " ) )
+							outline.Add( $"L{i + 1}: {t.Substring( 0, Math.Min( t.Length, 90 ) )}" );
+					}
+				}
+
+				return new
+				{
+					path,
+					totalLines = lines.Length,
+					shownRange = $"{startLine + 1}-{endLine}",
+					truncated  = endLine < lines.Length,
+					outline    = outline.Take( 40 ),
+					content    = sb.ToString()
+				};
+			}
+			catch ( Exception e ) { return new { error = e.Message }; }
+		}, new { type = "object", properties = new { path = new { type = "string", description = "Relative .cs file path" }, startLine = new { type = "integer", description = "First line to read (1-indexed, default 1)" }, maxLines = new { type = "integer", description = "Lines to return (default 300)" } }, required = new[] { "path" } } );
+
+		RegisterToolAsync( "sbox_patch_script", "Replace a text fragment in a C# script file. After patching, compiles the project and returns build result.", async args =>
+		{
+			var path    = args.GetProperty( "path" ).GetString()?.Replace( "\\", "/" ) ?? "";
+			var oldText = args.GetProperty( "old_text" ).GetString() ?? "";
+			var newText = args.GetProperty( "new_text" ).GetString() ?? "";
+
+			if ( path.Contains( ".." ) ) return (object)new { error = "Path traversal not allowed" };
+
+			try
+			{
+				string original = null;
+				string absPath;
+				if ( FileSystem.Mounted.FileExists( path ) )
+				{
+					absPath  = FileSystem.Mounted.GetFullPath( path );
+					original = System.IO.File.ReadAllText( absPath );
+				}
+				else
+				{
+					absPath  = System.IO.Path.Combine( FileSystem.Mounted.GetFullPath( "." ), path.Replace( "/", System.IO.Path.DirectorySeparatorChar.ToString() ) );
+					if ( !System.IO.File.Exists( absPath ) ) return new { error = $"File not found: {path}" };
+					original = System.IO.File.ReadAllText( absPath );
+				}
+
+				if ( !original.Contains( oldText ) )
+					return new { error = "old_text not found in file — no changes made", path };
+
+				var patched = original.Replace( oldText, newText );
+				System.IO.File.WriteAllText( absPath, patched );
+
+				// Trigger compile
+				object buildResult;
+				try
+				{
+					var psi = new System.Diagnostics.ProcessStartInfo
+					{
+						FileName        = "dotnet",
+						Arguments       = $"build \"{FileSystem.Mounted.GetFullPath( "." )}\" --no-restore -v quiet 2>&1",
+						RedirectStandardOutput = true,
+						RedirectStandardError  = true,
+						UseShellExecute = false,
+						CreateNoWindow  = true
+					};
+					using var proc = System.Diagnostics.Process.Start( psi );
+					var stdout = await proc.StandardOutput.ReadToEndAsync();
+					var stderr = await proc.StandardError.ReadToEndAsync();
+					await proc.WaitForExitAsync();
+					buildResult = new { exitCode = proc.ExitCode, output = (stdout + stderr).Trim() };
+				}
+				catch ( Exception be ) { buildResult = new { error = be.Message }; }
+
+				return new { success = true, path, replacements = (original.Length - patched.Length + newText.Length - oldText.Length) != 0 ? 1 : 0, build = buildResult };
+			}
+			catch ( Exception e ) { return (object)new { error = e.Message }; }
+		}, new { type = "object", properties = new { path = new { type = "string", description = "Relative .cs path" }, old_text = new { type = "string", description = "Exact text to replace" }, new_text = new { type = "string", description = "Replacement text" } }, required = new[] { "path", "old_text", "new_text" } }, annotations: new { destructiveHint = true } );
+
+		// ════════════════════════════════════════════════════════════════════
+		// KATEGORİ 3 — Akıllı Araçlar
+		// ════════════════════════════════════════════════════════════════════
+
+		RegisterToolAsync( "sbox_auto_fix_errors", "Compile the project and return structured error list with suggested fixes for each error.", async _ =>
+		{
+			try
+			{
+				var psi = new System.Diagnostics.ProcessStartInfo
+				{
+					FileName               = "dotnet",
+					Arguments              = $"build \"{FileSystem.Mounted.GetFullPath( "." )}\" --no-restore -v quiet 2>&1",
+					RedirectStandardOutput = true,
+					RedirectStandardError  = true,
+					UseShellExecute        = false,
+					CreateNoWindow         = true
+				};
+				using var proc = System.Diagnostics.Process.Start( psi );
+				var raw = await proc.StandardOutput.ReadToEndAsync() + await proc.StandardError.ReadToEndAsync();
+				await proc.WaitForExitAsync();
+
+				// Parse lines like: File.cs(10,3): error CS0246: ...
+				var errorRx = new System.Text.RegularExpressions.Regex( @"([^(]+)\((\d+),(\d+)\):\s+(error|warning)\s+(\w+):\s+(.+)" );
+				var errors  = new List<object>();
+				foreach ( var line in raw.Split( '\n' ) )
+				{
+					var m = errorRx.Match( line.Trim() );
+					if ( !m.Success ) continue;
+					var code = m.Groups[5].Value;
+					var msg  = m.Groups[6].Value.Trim();
+					errors.Add( new
+					{
+						file     = System.IO.Path.GetFileName( m.Groups[1].Value.Trim() ),
+						fullPath = m.Groups[1].Value.Trim(),
+						line     = int.Parse( m.Groups[2].Value ),
+						col      = int.Parse( m.Groups[3].Value ),
+						severity = m.Groups[4].Value,
+						code,
+						message  = msg,
+						hint     = code switch
+						{
+							"CS0618" => "Use the newer API suggested in the message (e.g. WorldPosition instead of Transform.Position)",
+							"CS0169" => "Field is declared but never used — remove it or add usage",
+							"CS0246" => "Type not found — check using directives or namespace",
+							"CS1061" => "Method/property does not exist — check API or spelling",
+							"SB1000" => "s&box whitelist violation — use TypeLibrary or GameTask instead of standard .NET API",
+							_        => "Review the message and fix accordingly"
+						}
+					} );
+				}
+
+				var success = proc.ExitCode == 0;
+				return (object)new { success, errorCount = errors.Count, errors };
+			}
+			catch ( Exception e ) { return (object)new { error = e.Message }; }
+		} );
+
+		RegisterTool( "sbox_describe_scene", "Return a natural language summary of the active scene suitable for LLM context.", _ =>
+		{
+			var scene = Game.ActiveScene;
+			if ( scene == null ) return new { description = "No active scene is loaded." };
+
+			var allObjects = scene.GetAllObjects( true ).Where( g => g.IsValid() ).ToList();
+			var byComponent = new Dictionary<string, int>();
+			foreach ( var go in allObjects )
+				foreach ( var c in go.Components.GetAll<Component>() )
+				{
+					var t = c.GetType().Name;
+					byComponent[t] = byComponent.TryGetValue( t, out var n ) ? n + 1 : 1;
+				}
+
+			// Game state
+			var gm   = scene.GetAllComponents<BlackFridayGameManager>().FirstOrDefault();
+			var qm   = scene.GetAllComponents<QuotaManager>().FirstOrDefault();
+			var alarm = scene.GetAllComponents<AlarmSystem>().FirstOrDefault();
+
+			var parts = new List<string>
+			{
+				$"The active scene contains {allObjects.Count} GameObjects.",
+				byComponent.Count > 0 ? "Component breakdown: " + string.Join( ", ", byComponent.OrderByDescending( p => p.Value ).Take( 10 ).Select( p => $"{p.Key}×{p.Value}" ) ) + "." : "",
+			};
+
+			if ( gm != null )
+				parts.Add( $"Game state: Day {gm.CurrentDay}, phase '{gm.CurrentPhase}', {gm.PhaseTimeRemaining:F0}s remaining in phase." );
+			if ( qm != null )
+				parts.Add( $"Economy: personal cash ${qm.MyPersonalCash:F0} / quota ${qm.PersonalQuota:F0}. Shared pool ${qm.SharedPoolCurrent:F0} / ${qm.SharedPoolTarget:F0}." );
+			if ( alarm != null )
+				parts.Add( $"Alarm: level {alarm.CurrentAlarmLevel} ({alarm.GetAlarmLevelName()}), progress {alarm.AlarmProgress:F0}%." );
+
+			return new { description = string.Join( " ", parts.Where( p => !string.IsNullOrEmpty( p ) ) ), objectCount = allObjects.Count, componentTypes = byComponent };
+		} );
+
+		// ════════════════════════════════════════════════════════════════════
+		// KATEGORİ 4 — Gerçek Zamanlı Property İzleme
+		// ════════════════════════════════════════════════════════════════════
+
+		RegisterTool( "sbox_watch_property", "Start watching a component property. When its value changes, all connected sessions receive a notification.", args =>
+		{
+			var goId   = args.GetProperty( "id" ).GetString();
+			var comp   = args.GetProperty( "component" ).GetString();
+			var prop   = args.GetProperty( "property" ).GetString();
+			var watchId = $"{goId}::{comp}::{prop}";
+			_watchedProperties[watchId] = (new WatchEntry( goId, comp, prop ), "");
+			return new { success = true, watchId, message = $"Now watching {comp}.{prop} on {goId}" };
+		}, new { type = "object", properties = new { id = new { type = "string", description = "GameObject GUID" }, component = new { type = "string", description = "Component type name" }, property = new { type = "string", description = "Property name" } }, required = new[] { "id", "component", "property" } } );
+
+		RegisterTool( "sbox_unwatch_property", "Stop watching a previously watched property.", args =>
+		{
+			var watchId = args.GetProperty( "watchId" ).GetString();
+			var removed = _watchedProperties.TryRemove( watchId, out _ );
+			return new { success = removed, watchId };
+		}, new { type = "object", properties = new { watchId = new { type = "string", description = "The watchId returned by sbox_watch_property" } }, required = new[] { "watchId" } } );
+
+		RegisterTool( "sbox_list_watches", "List all currently active property watches.", _ =>
+		{
+			var list = _watchedProperties.Select( kv => new
+			{
+				watchId   = kv.Key,
+				gameObjectId = kv.Value.Watch.GameObjectId,
+				component = kv.Value.Watch.ComponentType,
+				property  = kv.Value.Watch.PropertyName,
+				lastValue = kv.Value.LastValue
+			} ).ToList();
+			return new { count = list.Count, watches = list };
+		} );
 	}
 
-	// ── Accept loop ────────────────────────────────────────────────
+	// ── Property watch polling (called from state poll loop) ──────────────
+	private static async Task PollWatchedPropertiesAsync()
+	{
+		if ( _watchedProperties.IsEmpty ) return;
+		var scene = Game.ActiveScene;
+		if ( scene == null ) return;
+
+		foreach ( var kv in _watchedProperties.ToArray() )
+		{
+			try
+			{
+				var w = kv.Value.Watch;
+				if ( !Guid.TryParse( w.GameObjectId, out var guid ) ) continue;
+				var go = scene.Directory.FindByGuid( guid );
+				if ( !go.IsValid() ) continue;
+
+				// Find component via TypeLibrary
+				Component foundComp = null;
+				foreach ( var c in go.Components.GetAll<Component>() )
+				{
+					if ( c.GetType().Name == w.ComponentType ) { foundComp = c; break; }
+				}
+				if ( foundComp == null ) continue;
+
+				var typeDesc = TypeLibrary.GetType( foundComp.GetType() );
+				var propDesc = typeDesc?.Properties.FirstOrDefault( p => p.Name == w.PropertyName );
+				if ( propDesc == null ) continue;
+
+				var currentValue = propDesc.GetValue( foundComp )?.ToString() ?? "null";
+				var lastValue    = kv.Value.LastValue;
+
+				if ( currentValue != lastValue )
+				{
+					_watchedProperties[kv.Key] = (w, currentValue);
+					await BroadcastEventAsync( "notifications/property/changed", JsonSerializer.Serialize( new
+					{
+						watchId   = kv.Key,
+						gameObjectId = w.GameObjectId,
+						component = w.ComponentType,
+						property  = w.PropertyName,
+						oldValue  = lastValue,
+						newValue  = currentValue,
+						timestamp = DateTime.UtcNow
+					} ) );
+				}
+			}
+			catch { }
+		}
+	}
+
+	// ── Cache helper ──────────────────────────────────────────────────────
+	private static bool TryGetCached( string toolName, string argsKey, out object result )
+	{
+		result = null;
+		if ( !_cacheableTools.Contains( toolName ) ) return false;
+		var key = $"{toolName}::{argsKey}";
+		if ( _toolCache.TryGetValue( key, out var entry ) && DateTime.UtcNow < entry.ExpiresAt )
+		{
+			result = entry.Result;
+			return true;
+		}
+		return false;
+	}
+
+	private static void SetCache( string toolName, string argsKey, object result )
+	{
+		if ( !_cacheableTools.Contains( toolName ) ) return;
+		var key = $"{toolName}::{argsKey}";
+		_toolCache[key] = new CacheEntry( result, DateTime.UtcNow.AddSeconds( DefaultCacheTtlSeconds ) );
+	}
+
+	// ── (original closing brace for RegisterTools was here — now replaced by real closing brace above) ──
 
 	private static async Task AcceptLoopAsync()
 	{
