@@ -48,7 +48,6 @@ public class PhysicsTools
 
 	[McpTool("sbox_get_timescale", "Returns the current global time scale.", ReadOnlyHint = true)] public object GetTimescale() => new { success = true, timescale = LoadTimescale() };
 
-	[McpTool("sbox_apply_impulse", "Applies a physics impulse to a GameObject's Rigidbody.", OptionalParams = new[]{"x", "y", "z"}, DestructiveHint = true)]
 	public object ApplyImpulse( string guidStr, float x = 0f, float y = 0f, float z = 0f )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
@@ -68,7 +67,6 @@ public class PhysicsTools
 		return new { success = true, gameObject = go.Name, velocity = rb.Velocity, angularVelocity = rb.AngularVelocity };
 	}
 
-	[McpTool("sbox_raycast", "Casts a ray from start to end and returns hit info.", ReadOnlyHint = true)]
 	public object Raycast( float ox, float oy, float oz, float tx, float ty, float tz )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
@@ -90,14 +88,15 @@ public class PhysicsTools
 	}
 
 	[McpTool("sbox_set_physics_material", "Sets physics damping/mass on a Rigidbody.", OptionalParams = new[]{"linearDamping", "angularDamping", "mass"}, DestructiveHint = true)]
-	public object SetPhysicsMaterial( string guidStr, string linearDamping = null, string angularDamping = null, string mass = null )
+	public object SetPhysicsMaterial( string guidStr, float? linearDamping = null, float? angularDamping = null, float? mass = null )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
 		if ( !Guid.TryParse( guidStr, out var guid ) ) return new { error = "Invalid Guid" };
 		var go = scene.Directory.FindByGuid( guid ); if ( !go.IsValid() ) return new { error = "GameObject not found" };
 		var rb = go.Components.Get<Rigidbody>(); if ( !rb.IsValid() ) return new { error = "No Rigidbody" };
-		if ( linearDamping != null && float.TryParse( linearDamping, out var ld ) ) rb.LinearDamping = Math.Max( 0f, ld );
-		if ( angularDamping != null && float.TryParse( angularDamping, out var ad ) ) rb.AngularDamping = Math.Max( 0f, ad );
+		if ( linearDamping.HasValue ) rb.LinearDamping = Math.Max( 0f, linearDamping.Value );
+		if ( angularDamping.HasValue ) rb.AngularDamping = Math.Max( 0f, angularDamping.Value );
+		if ( mass.HasValue ) rb.MassOverride = Math.Max( 0.001f, mass.Value );
 		return new { success = true, linearDamping = rb.LinearDamping, angularDamping = rb.AngularDamping, mass = rb.Mass };
 	}
 

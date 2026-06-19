@@ -25,22 +25,30 @@ public class SceneTools
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
 		if ( !Guid.TryParse( guidStr, out var guid ) ) return new { error = "Invalid Guid" };
 		var go = scene.Directory.FindByGuid( guid ); if ( !go.IsValid() ) return new { error = "GameObject not found" };
-		var parts = color.Split( ',' ); if ( parts.Length < 3 || !float.TryParse( parts[0], out var r ) || !float.TryParse( parts[1], out var g ) || !float.TryParse( parts[2], out var b ) ) return new { error = "Invalid color" };
-		var newColor = new Color( r, g, b );
+		var parsedColor = AssetTools.ParseColor( color );
+		if ( !parsedColor.HasValue ) return new { error = "Invalid color" };
+		var newColor = parsedColor.Value;
 		var dl = go.Components.Get<DirectionalLight>();
-		if ( dl.IsValid() ) { dl.LightColor = newColor; if ( shadows != null && bool.TryParse( shadows, out var sv ) ) dl.Shadows = sv; if ( shadowHardness != null && float.TryParse( shadowHardness, out var sh ) ) dl.ShadowHardness = sh; if ( fogStrength != null && float.TryParse( fogStrength, out var fs ) ) dl.FogStrength = fs; return new { success = true, type = "DirectionalLight" }; }
+		if ( dl.IsValid() )
+		{
+			dl.LightColor = newColor;
+			if ( shadows != null && bool.TryParse( shadows, out var sv ) ) dl.Shadows = sv;
+			if ( shadowHardness != null && float.TryParse( shadowHardness, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var sh ) ) dl.ShadowHardness = sh;
+			if ( fogStrength != null && float.TryParse( fogStrength, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var fs ) ) dl.FogStrength = fs;
+			return new { success = true, type = "DirectionalLight" };
+		}
 		var pl = go.Components.Get<PointLight>();
 		if ( pl.IsValid() ) { pl.LightColor = newColor; if ( shadows != null && bool.TryParse( shadows, out var sv ) ) pl.Shadows = sv; return new { success = true, type = "PointLight" }; }
 		return new { error = "No light component found" };
 	}
 
 	[McpTool("sbox_set_fog", "Controls fog settings on the scene's DirectionalLight.", OptionalParams = new[]{"mode", "strength", "lightGuid"}, DestructiveHint = true)]
-	public object SetFog( string mode = null, string strength = null, string lightGuid = null )
+	public object SetFog( string mode = null, float? strength = null, string lightGuid = null )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
 		var light = FindDirectionalLight( scene, lightGuid ); if ( light == null ) return new { error = "No DirectionalLight found" };
 		if ( mode != null ) { try { var fogType = TypeLibrary.GetType( "Sandbox.FogMode" ); var lightType = TypeLibrary.GetType( typeof( DirectionalLight ) ); if ( fogType != null && lightType != null ) { var fp = lightType.Properties.FirstOrDefault( p => p.Name == "FogMode" && p.CanWrite ); if ( fp != null ) fp.SetValue( light, Enum.Parse( fogType.TargetType, mode, ignoreCase: true ) ); } } catch { return new { error = "Invalid fog mode" }; } }
-		if ( strength != null && float.TryParse( strength, out var fs ) ) light.FogStrength = fs;
+		if ( strength.HasValue ) light.FogStrength = strength.Value;
 		return new { success = true, fogMode = light.FogMode.ToString(), fogStrength = light.FogStrength };
 	}
 
@@ -49,8 +57,9 @@ public class SceneTools
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
 		var cam = scene.GetAllComponents<CameraComponent>().FirstOrDefault( c => c.IsMainCamera ); if ( cam == null ) return new { error = "No main camera" };
-		var parts = color.Split( ',' ); if ( parts.Length < 3 || !float.TryParse( parts[0], out var r ) || !float.TryParse( parts[1], out var g ) || !float.TryParse( parts[2], out var b ) ) return new { error = "Invalid color" };
-		cam.BackgroundColor = new Color( r, g, b );
+		var parsedColor = AssetTools.ParseColor( color );
+		if ( !parsedColor.HasValue ) return new { error = "Invalid color" };
+		cam.BackgroundColor = parsedColor.Value;
 		if ( clearFlags != null ) { var f = clearFlags.ToLowerInvariant(); if ( f == "all" ) cam.ClearFlags = ClearFlags.All; else if ( f == "color" ) cam.ClearFlags = ClearFlags.Color; else if ( f == "depth" ) cam.ClearFlags = ClearFlags.Depth; else if ( f == "none" ) cam.ClearFlags = ClearFlags.None; }
 		return new { success = true, backgroundColor = cam.BackgroundColor.ToString(), clearFlags = cam.ClearFlags.ToString() };
 	}
@@ -81,17 +90,17 @@ public class SceneTools
 	}
 
 	[McpTool("sbox_set_shadow_settings", "Sets shadow quality settings on the main directional light.", OptionalParams = new[]{"distance", "bias", "normalBias", "cascadeCount", "lightGuid"}, DestructiveHint = true)]
-	public object SetShadowSettings( string distance = null, string bias = null, string normalBias = null, string cascadeCount = null, string lightGuid = null )
+	public object SetShadowSettings( float? distance = null, float? bias = null, float? normalBias = null, int? cascadeCount = null, string lightGuid = null )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
 		var light = FindDirectionalLight( scene, lightGuid ); if ( light == null ) return new { error = "No DirectionalLight" };
 		try
 		{
 			var td = TypeLibrary.GetType( typeof( DirectionalLight ) );
-			if ( distance != null && float.TryParse( distance, out var d ) ) td?.Properties.FirstOrDefault( p => p.Name == "ShadowDistance" && p.CanWrite )?.SetValue( light, d );
-			if ( bias != null && float.TryParse( bias, out var b ) ) td?.Properties.FirstOrDefault( p => p.Name == "ShadowBias" && p.CanWrite )?.SetValue( light, b );
-			if ( normalBias != null && float.TryParse( normalBias, out var nb ) ) td?.Properties.FirstOrDefault( p => p.Name == "ShadowNormalBias" && p.CanWrite )?.SetValue( light, nb );
-			if ( cascadeCount != null && int.TryParse( cascadeCount, out var cc ) ) td?.Properties.FirstOrDefault( p => p.Name == "ShadowCascadeCount" && p.CanWrite )?.SetValue( light, cc );
+			if ( distance.HasValue ) td?.Properties.FirstOrDefault( p => p.Name == "ShadowDistance" && p.CanWrite )?.SetValue( light, distance.Value );
+			if ( bias.HasValue ) td?.Properties.FirstOrDefault( p => p.Name == "ShadowBias" && p.CanWrite )?.SetValue( light, bias.Value );
+			if ( normalBias.HasValue ) td?.Properties.FirstOrDefault( p => p.Name == "ShadowNormalBias" && p.CanWrite )?.SetValue( light, normalBias.Value );
+			if ( cascadeCount.HasValue ) td?.Properties.FirstOrDefault( p => p.Name == "ShadowCascadeCount" && p.CanWrite )?.SetValue( light, cascadeCount.Value );
 		}
 		catch ( Exception e ) { return new { error = e.Message }; }
 		var shadowDistProp = TypeLibrary.GetType( typeof( DirectionalLight ) )?.Properties.FirstOrDefault( p => p.Name == "ShadowDistance" && p.CanRead );
@@ -183,8 +192,9 @@ public class SceneTools
 		if ( !Guid.TryParse( guidStr, out var guid ) ) return new { error = "Invalid Guid" };
 		var go = scene.Directory.FindByGuid( guid ); if ( !go.IsValid() ) return new { error = "GameObject not found" };
 		var renderer = go.Components.Get<ModelRenderer>(); if ( !renderer.IsValid() ) return new { error = "No ModelRenderer" };
-		var parts = color.Split( ',' ); if ( parts.Length < 3 || !float.TryParse( parts[0], out var r ) || !float.TryParse( parts[1], out var g ) || !float.TryParse( parts[2], out var b ) ) return new { error = "Invalid color" };
-		renderer.Tint = new Color( r, g, b, parts.Length >= 4 && float.TryParse( parts[3], out var a ) ? a : 1f );
+		var parsedColor = AssetTools.ParseColor( color );
+		if ( !parsedColor.HasValue ) return new { error = "Invalid color" };
+		renderer.Tint = parsedColor.Value;
 		return new { success = true, newColor = renderer.Tint.ToString() };
 	}
 

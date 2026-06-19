@@ -28,7 +28,7 @@ internal static class McpSceneTools
 		{
 			var name = args.GetProperty( "name" ).GetString();
 			var pos = args.TryGetProperty( "position", out var p )
-				? JsonSerializer.Deserialize<Vector3>( p.GetRawText() )
+				? (Vector3)McpBridge.Tools.AssetTools.ConvertValue( p, typeof( Vector3 ) )
 				: Vector3.Zero;
 			var go = new GameObject( true, name );
 			go.WorldPosition = pos;
@@ -606,10 +606,10 @@ internal static class McpSceneTools
 					byComponent[t] = byComponent.TryGetValue( t, out var n ) ? n + 1 : 1;
 				}
 
-			// Game state
-			var gm   = scene.GetAllComponents<BlackFridayGameManager>().FirstOrDefault();
-			var qm   = scene.GetAllComponents<QuotaManager>().FirstOrDefault();
-			var alarm = scene.GetAllComponents<AlarmSystem>().FirstOrDefault();
+			// Game state (reflection based to survive hotloading)
+			var gm = McpEditorServer.GetDynamicComponent( "BlackFridayGameManager" );
+			var qm = McpEditorServer.GetDynamicComponent( "QuotaManager" );
+			var alarm = McpEditorServer.GetDynamicComponent( "AlarmSystem" );
 
 			var parts = new List<string>
 			{
@@ -618,11 +618,34 @@ internal static class McpSceneTools
 			};
 
 			if ( gm != null )
-				parts.Add( $"Game state: Day {gm.CurrentDay}, phase '{gm.CurrentPhase}', {gm.PhaseTimeRemaining:F0}s remaining in phase." );
+			{
+				var currentDay = McpEditorServer.GetPropValue<int>( gm, "CurrentDay" );
+				var currentPhase = McpEditorServer.GetPropValue<string>( gm, "CurrentPhase" ) ?? "unknown";
+				var timeRemaining = McpEditorServer.GetPropValue<float>( gm, "PhaseTimeRemaining" );
+				parts.Add( $"Game state: Day {currentDay}, phase '{currentPhase}', {timeRemaining:F0}s remaining in phase." );
+			}
 			if ( qm != null )
-				parts.Add( $"Economy: personal cash ${qm.MyPersonalCash:F0} / quota ${qm.PersonalQuota:F0}. Shared pool ${qm.SharedPoolCurrent:F0} / ${qm.SharedPoolTarget:F0}." );
+			{
+				var cash = McpEditorServer.GetPropValue<float>( qm, "MyPersonalCash" );
+				var quota = McpEditorServer.GetPropValue<float>( qm, "PersonalQuota" );
+				var shared = McpEditorServer.GetPropValue<float>( qm, "SharedPoolCurrent" );
+				var target = McpEditorServer.GetPropValue<float>( qm, "SharedPoolTarget" );
+				parts.Add( $"Economy: personal cash ${cash:F0} / quota ${quota:F0}. Shared pool ${shared:F0} / ${target:F0}." );
+			}
 			if ( alarm != null )
-				parts.Add( $"Alarm: level {alarm.CurrentAlarmLevel} ({alarm.GetAlarmLevelName()}), progress {alarm.AlarmProgress:F0}%." );
+			{
+				var level = McpEditorServer.GetPropValue<int>( alarm, "CurrentAlarmLevel" );
+				var progress = McpEditorServer.GetPropValue<float>( alarm, "AlarmProgress" );
+				var levelName = "unknown";
+				try
+				{
+					var method = alarm.GetType().GetMethod( "GetAlarmLevelName" );
+					if ( method != null )
+						levelName = method.Invoke( alarm, null ) as string ?? "unknown";
+				}
+				catch { }
+				parts.Add( $"Alarm: level {level} ({levelName}), progress {progress:F0}%." );
+			}
 
 			return new { description = string.Join( " ", parts.Where( p => !string.IsNullOrEmpty( p ) ) ), objectCount = allObjects.Count, componentTypes = byComponent };
 		}, runOnMainThread: true );

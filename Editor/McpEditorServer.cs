@@ -19,6 +19,7 @@ namespace Editor;
 
 public static class McpEditorServer
 {
+	private static readonly JsonSerializerOptions IndentedJsonOpts = new() { WriteIndented = true };
 	private const int DefaultPort = 29016;
 	private const string DefaultApiKey = "sbox-ai-2026";
 	internal static int _port = DefaultPort;
@@ -118,15 +119,15 @@ public static class McpEditorServer
 		{
 			return uri switch
 			{
-				"sbox://scene/state"  => JsonSerializer.Serialize( GetSceneState(),    new JsonSerializerOptions { WriteIndented = true } ),
-				"sbox://entities"     => JsonSerializer.Serialize( GetSceneEntities(), new JsonSerializerOptions { WriteIndented = true } ),
-				"sbox://prefabs"      => JsonSerializer.Serialize( ListAssetsByExt( ".prefab" ),                             new JsonSerializerOptions { WriteIndented = true } ),
-				"sbox://materials"    => JsonSerializer.Serialize( ListAssetsByExt( ".vmat" ),                               new JsonSerializerOptions { WriteIndented = true } ),
-				"sbox://textures"     => JsonSerializer.Serialize( ListAssetsByExt( ".vtex" ),                               new JsonSerializerOptions { WriteIndented = true } ),
-				"sbox://models"       => JsonSerializer.Serialize( ListAssetsByExt( ".vmdl" ),                               new JsonSerializerOptions { WriteIndented = true } ),
-				"sbox://sounds"       => JsonSerializer.Serialize( ListAssetsByExt( ".vsnd", ".vsndevts", ".wav", ".mp3" ),  new JsonSerializerOptions { WriteIndented = true } ),
-				"sbox://maps"         => JsonSerializer.Serialize( ListAssetsByExt( ".sbox" ),                               new JsonSerializerOptions { WriteIndented = true } ),
-				"sbox://console/logs" => JsonSerializer.Serialize( McpLogBridge.GetRecent( 100 ),                            new JsonSerializerOptions { WriteIndented = true } ),
+				"sbox://scene/state"  => JsonSerializer.Serialize( GetSceneState(),    IndentedJsonOpts ),
+				"sbox://entities"     => JsonSerializer.Serialize( GetSceneEntities(), IndentedJsonOpts ),
+				"sbox://prefabs"      => JsonSerializer.Serialize( ListAssetsByExt( ".prefab" ),                             IndentedJsonOpts ),
+				"sbox://materials"    => JsonSerializer.Serialize( ListAssetsByExt( ".vmat" ),                               IndentedJsonOpts ),
+				"sbox://textures"     => JsonSerializer.Serialize( ListAssetsByExt( ".vtex" ),                               IndentedJsonOpts ),
+				"sbox://models"       => JsonSerializer.Serialize( ListAssetsByExt( ".vmdl" ),                               IndentedJsonOpts ),
+				"sbox://sounds"       => JsonSerializer.Serialize( ListAssetsByExt( ".vsnd", ".vsndevts", ".wav", ".mp3" ),  IndentedJsonOpts ),
+				"sbox://maps"         => JsonSerializer.Serialize( ListAssetsByExt( ".sbox" ),                               IndentedJsonOpts ),
+				"sbox://console/logs" => JsonSerializer.Serialize( McpLogBridge.GetRecent( 100 ),                            IndentedJsonOpts ),
 				_ when uri.StartsWith( "sbox://file/" ) => ReadFilePreviewContent( uri.Substring( "sbox://file/".Length ) ),
 				_ => $"// Unknown resource URI: {uri}"
 			};

@@ -7,7 +7,7 @@ namespace McpBridge;
 
 public static class PersistenceStore
 {
-	public static JsonSerializerOptions JsonOpts { get; } = new() { WriteIndented = true };
+	public static JsonSerializerOptions JsonOpts { get; } = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
 
 	public static T Load<T>( string path ) where T : new()
 	{
@@ -16,7 +16,7 @@ public static class PersistenceStore
 			if ( FileSystem.Data.FileExists( path ) )
 			{
 				var json = FileSystem.Data.ReadAllText( path );
-				return JsonSerializer.Deserialize<T>( json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true } ) ?? new T();
+				return JsonSerializer.Deserialize<T>( json, JsonOpts ) ?? new T();
 			}
 		}
 		catch ( Exception e )

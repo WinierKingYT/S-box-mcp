@@ -28,7 +28,6 @@ public class CoreTools
 		catch { return new { error = "Command failed" }; }
 	}
 
-	[McpTool("sbox_get_scene_hierarchy", "Returns scene hierarchy: all GameObjects with name, GUID, child count, component list.", ReadOnlyHint = true)]
 	public object GetSceneHierarchy()
 	{
 		var activeScene = Game.ActiveScene;
@@ -48,7 +47,6 @@ public class CoreTools
 		return new { id = go.Id, name = go.Name, worldPosition = go.WorldPosition, worldRotation = go.WorldRotation.Angles(), components };
 	}
 
-	[McpTool("sbox_destroy_gameobject", "Destroys a GameObject by GUID. Supports undo via sbox_undo.", DestructiveHint = true)]
 	public object DestroyGameObject( string guidStr )
 	{
 		var activeScene = Game.ActiveScene;
@@ -65,7 +63,6 @@ public class CoreTools
 		return new { success = true, message = $"Destroyed {name}" };
 	}
 
-	[McpTool("sbox_set_transform", "Sets the transform of a GameObject with undo support.", OptionalParams = new[]{"position", "rotation", "scale"}, DestructiveHint = true)]
 	public object SetTransform(
 		string guidStr,
 		string position = null,
@@ -78,9 +75,9 @@ public class CoreTools
 		var go = activeScene.Directory.FindByGuid( guid );
 		if ( go == null ) return new { error = "GameObject not found" };
 		var oldPos = go.WorldPosition; var oldRot = go.WorldRotation; var oldScale = go.LocalScale;
-		if ( position != null ) { var p = position.Split( ',' ); if ( p.Length == 3 && float.TryParse( p[0], out var x ) && float.TryParse( p[1], out var y ) && float.TryParse( p[2], out var z ) ) go.WorldPosition = new Vector3( x, y, z ); }
-		if ( rotation != null ) { var p = rotation.Split( ',' ); if ( p.Length == 3 && float.TryParse( p[0], out var p1 ) && float.TryParse( p[1], out var y ) && float.TryParse( p[2], out var r ) ) go.WorldRotation = new Angles( p1, y, r ).ToRotation(); }
-		if ( scale != null ) { var p = scale.Split( ',' ); if ( p.Length == 3 && float.TryParse( p[0], out var x ) && float.TryParse( p[1], out var y ) && float.TryParse( p[2], out var z ) ) go.LocalScale = new Vector3( x, y, z ); }
+		if ( position != null ) { var parsed = AssetTools.ParseVector3( position ); if ( parsed.HasValue ) go.WorldPosition = parsed.Value; }
+		if ( rotation != null ) { var parsed = AssetTools.ParseRotation( rotation ); if ( parsed.HasValue ) go.WorldRotation = parsed.Value; }
+		if ( scale != null ) { var parsed = AssetTools.ParseVector3( scale ); if ( parsed.HasValue ) go.LocalScale = parsed.Value; }
 		var newPos = go.WorldPosition; var newRot = go.WorldRotation; var newScale = go.LocalScale;
 		UndoRedoManager.Record( "set_transform", $"Moved {go.Name}",
 			undoFn: () => { var s = Game.ActiveScene; if ( s == null ) return new { error = "No active scene" }; var g = s.Directory.FindByGuid( guid ); if ( !g.IsValid() ) return new { error = "Object gone" }; g.WorldPosition = oldPos; g.WorldRotation = oldRot; g.LocalScale = oldScale; return new { success = true, message = $"Restored {g.Name}" }; },
@@ -88,7 +85,6 @@ public class CoreTools
 		return new { success = true, name = go.Name, position = go.WorldPosition, rotation = go.WorldRotation.Angles(), scale = go.LocalScale };
 	}
 
-	[McpTool("sbox_spawn_prefab", "Spawns a prefab at the given position with undo support.", OptionalParams = new[]{"position"}, DestructiveHint = true)]
 	public object SpawnPrefab( string prefabPath, string position = null )
 	{
 		var activeScene = Game.ActiveScene;
@@ -97,7 +93,7 @@ public class CoreTools
 		if ( prefab == null ) return new { error = $"Prefab not found: {prefabPath}" };
 		var go = SceneUtility.GetPrefabScene( prefab ).Clone();
 		go.SetParent( activeScene );
-		if ( position != null ) { var p = position.Split( ',' ); if ( p.Length == 3 && float.TryParse( p[0], out var x ) && float.TryParse( p[1], out var y ) && float.TryParse( p[2], out var z ) ) go.WorldPosition = new Vector3( x, y, z ); }
+		if ( position != null ) { var parsed = AssetTools.ParseVector3( position ); if ( parsed.HasValue ) go.WorldPosition = parsed.Value; }
 		var spawnedGuid = go.Id; var spawnedName = go.Name;
 		UndoRedoManager.Record( "spawn_prefab", $"Spawned {spawnedName}",
 			undoFn: () => { var s = Game.ActiveScene; if ( s == null ) return new { error = "No active scene" }; var g = s.Directory.FindByGuid( spawnedGuid ); if ( g.IsValid() ) { g.Destroy(); return new { success = true, message = $"Destroyed {spawnedName}" }; } return new { warning = "Already destroyed" }; },
@@ -140,7 +136,6 @@ public class CoreTools
 		try { var converted = ConvertValue( value, prop.PropertyType ); prop.SetValue( comp, converted ); return new { success = true, newValue = FormatValue( converted ) }; } catch ( Exception e ) { return new { error = e.Message }; }
 	}
 
-	[McpTool("sbox_add_component", "Adds a component to a GameObject.", DestructiveHint = true)]
 	public object AddComponent( string guidStr, string componentType )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };

@@ -11,6 +11,8 @@ namespace Editor;
 [Dock( "Editor", "MCP Server Dashboard", "api" )]
 public class McpDashboardWidget : Widget
 {
+	private static readonly JsonSerializerOptions IndentedJsonOpts = new() { WriteIndented = true };
+
 	// ── Tab Containers ────────────────────────────────────────────────────
 	private Widget _statusContainer;
 	private Widget _toolsContainer;
@@ -415,7 +417,7 @@ public class McpDashboardWidget : Widget
 		try
 		{
 			var res = await McpEditorServer.ExecuteRegisteredTool( _selectedToolName, _toolArgsEdit.Text );
-			_toolResultLabel.PlainText = "Result:\n" + JsonSerializer.Serialize( res, new JsonSerializerOptions { WriteIndented = true } );
+			_toolResultLabel.PlainText = "Result:\n" + JsonSerializer.Serialize( res, IndentedJsonOpts );
 		}
 		catch ( Exception ex ) { _toolResultLabel.PlainText = $"Error: {ex.Message}"; }
 	}
@@ -518,7 +520,7 @@ public class McpDashboardWidget : Widget
 		try
 		{
 			using var doc = JsonDocument.Parse( raw );
-			return JsonSerializer.Serialize( doc.RootElement, new JsonSerializerOptions { WriteIndented = true } );
+			return JsonSerializer.Serialize( doc.RootElement, IndentedJsonOpts );
 		}
 		catch { return raw; }
 	}

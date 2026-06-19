@@ -10,6 +10,8 @@ namespace McpBridge.Tools;
 [McpToolGroup("Asset")]
 public class AssetTools
 {
+	private static readonly JsonSerializerOptions IndentedJsonOpts = new() { WriteIndented = true };
+
 	[McpTool("sbox_asset_save_prefab", "Saves a GameObject as a prefab file.", OptionalParams = new[]{"fileName"}, DestructiveHint = true)]
 	public object SavePrefab( string guidStr, string fileName = null )
 	{
@@ -211,7 +213,7 @@ public class AssetTools
 		try
 		{
 			var data = SerializeGameObject( go );
-			var json = JsonSerializer.Serialize( data, new JsonSerializerOptions { WriteIndented = true } );
+			var json = JsonSerializer.Serialize( data, IndentedJsonOpts );
 			return new { success = true, id = guidStr, name = go.Name, json };
 		}
 		catch ( Exception e )
@@ -536,5 +538,56 @@ public class AssetTools
 		{
 			return null;
 		}
+	}
+
+	public static Vector3? ParseVector3( string str )
+	{
+		if ( string.IsNullOrWhiteSpace( str ) ) return null;
+		var parts = str.Split( ',' );
+		if ( parts.Length == 3 &&
+			 float.TryParse( parts[0], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var x ) &&
+			 float.TryParse( parts[1], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var y ) &&
+			 float.TryParse( parts[2], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var z ) )
+		{
+			return new Vector3( x, y, z );
+		}
+		return null;
+	}
+
+	public static Rotation? ParseRotation( string str )
+	{
+		if ( string.IsNullOrWhiteSpace( str ) ) return null;
+		var parts = str.Split( ',' );
+		if ( parts.Length == 3 &&
+			 float.TryParse( parts[0], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var pitch ) &&
+			 float.TryParse( parts[1], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var yaw ) &&
+			 float.TryParse( parts[2], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var roll ) )
+		{
+			return Rotation.From( pitch, yaw, roll );
+		}
+		return null;
+	}
+
+	public static Color? ParseColor( string str )
+	{
+		if ( string.IsNullOrWhiteSpace( str ) ) return null;
+		var parts = str.Split( ',' );
+		if ( parts.Length >= 3 &&
+			 float.TryParse( parts[0], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var r ) &&
+			 float.TryParse( parts[1], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var g ) &&
+			 float.TryParse( parts[2], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var b ) )
+		{
+			var a = 1f;
+			if ( parts.Length >= 4 && float.TryParse( parts[3], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var parsedA ) )
+			{
+				a = parsedA;
+			}
+			return new Color( r, g, b, a );
+		}
+		if ( Color.TryParse( str, out var color ) )
+		{
+			return color;
+		}
+		return null;
 	}
 }
