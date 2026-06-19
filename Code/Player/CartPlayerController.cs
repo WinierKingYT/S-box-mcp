@@ -14,7 +14,7 @@ public sealed class CartPlayerController : Component
 
 	protected override void OnStart()
 	{
-		_spawnPosition = Transform.Position;
+		_spawnPosition = WorldPosition;
 
 		if ( IsProxy ) return;
 
@@ -36,9 +36,9 @@ public sealed class CartPlayerController : Component
 			_cartInstance.Destroy();
 		}
 
-		_cartInstance = CartPrefab.Clone( Transform.Position + Transform.Rotation.Forward * 80f );
+		_cartInstance = CartPrefab.Clone( WorldPosition + WorldRotation.Forward * 80f );
 		_cartInstance.BreakFromPrefab();
-		_cartInstance.NetworkSpawn( Network.OwnerConnection );
+		_cartInstance.NetworkSpawn( Network.Owner );
 
 		Cart = _cartInstance.Components.Get<ShoppingCartController>();
 	}

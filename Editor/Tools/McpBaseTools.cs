@@ -12,6 +12,33 @@ namespace Editor;
 
 internal static class McpBaseTools
 {
+	private static readonly System.Net.Http.HttpClient _httpClient = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds( 15 ) };
+
+	private static void ApplyHeaders( System.Net.Http.HttpRequestMessage req, JsonElement headersElement )
+	{
+		var element = headersElement;
+		if ( headersElement.ValueKind == JsonValueKind.String )
+		{
+			var str = headersElement.GetString();
+			if ( !string.IsNullOrEmpty( str ) )
+			{
+				try
+				{
+					using var doc = JsonDocument.Parse( str );
+					element = doc.RootElement.Clone();
+				}
+				catch { /* ignore invalid JSON */ }
+			}
+		}
+		if ( element.ValueKind == JsonValueKind.Object )
+		{
+			foreach ( var header in element.EnumerateObject() )
+			{
+				req.Headers.TryAddWithoutValidation( header.Name, header.Value.GetString() );
+			}
+		}
+	}
+
 	internal static void Register()
 	{
 		McpEditorServer.RegisterToolAsync( "list_tools", "List all available tools (editor + game) with optional pagination and filtering", async args =>
@@ -73,14 +100,12 @@ internal static class McpBaseTools
 			try
 			{
 				var url = args.GetProperty( "url" ).GetString();
-				using var client = new System.Net.Http.HttpClient();
-				client.Timeout = TimeSpan.FromSeconds( 15 );
+				using var req = new System.Net.Http.HttpRequestMessage( System.Net.Http.HttpMethod.Get, url );
 				if ( args.TryGetProperty( "headers", out var h ) )
 				{
-					foreach ( var header in h.EnumerateObject() )
-						client.DefaultRequestHeaders.TryAddWithoutValidation( header.Name, header.Value.GetString() );
+					ApplyHeaders( req, h );
 				}
-				var resp = await client.GetAsync( url );
+				var resp = await _httpClient.SendAsync( req );
 				var body = await resp.Content.ReadAsStringAsync();
 				return new { success = true, statusCode = (int)resp.StatusCode, contentType = resp.Content.Headers.ContentType?.ToString(), bodyLength = body.Length, body = body.Length < 10000 ? body : body.Substring( 0, 10000 ) + "..." };
 			}
@@ -111,15 +136,13 @@ internal static class McpBaseTools
 			{
 				var url = args.GetProperty( "url" ).GetString();
 				var body = args.TryGetProperty( "body", out var b ) ? b.GetString() ?? "{}" : "{}";
-				using var client = new System.Net.Http.HttpClient();
-				client.Timeout = TimeSpan.FromSeconds( 15 );
+				using var req = new System.Net.Http.HttpRequestMessage( System.Net.Http.HttpMethod.Post, url );
 				if ( args.TryGetProperty( "headers", out var h ) )
 				{
-					foreach ( var header in h.EnumerateObject() )
-						client.DefaultRequestHeaders.TryAddWithoutValidation( header.Name, header.Value.GetString() );
+					ApplyHeaders( req, h );
 				}
-				var content = new System.Net.Http.StringContent( body, Encoding.UTF8, "application/json" );
-				var resp = await client.PostAsync( url, content );
+				req.Content = new System.Net.Http.StringContent( body, Encoding.UTF8, "application/json" );
+				var resp = await _httpClient.SendAsync( req );
 				var respBody = await resp.Content.ReadAsStringAsync();
 				return new { success = true, statusCode = (int)resp.StatusCode, contentType = resp.Content.Headers.ContentType?.ToString(), bodyLength = respBody.Length, body = respBody.Length <= 10000 ? respBody : respBody.Substring( 0, 10000 ) + "..." };
 			}

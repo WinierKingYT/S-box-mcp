@@ -1700,7 +1700,7 @@ public static class McpEditorServer
 	{
 		while ( !_cts.IsCancellationRequested )
 		{
-			try { await GameTask.Delay( 30000 ); }
+			try { await GameTask.Delay( 30000, _cts.Token ); }
 			catch { break; }
 			if ( _cts.IsCancellationRequested ) break;
 

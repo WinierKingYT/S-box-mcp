@@ -46,7 +46,7 @@ public sealed class ShoppingCartController : Component
 			return;
 		}
 
-		var fwd = Transform.Rotation.Forward.WithZ( 0 ).Normal;
+		var fwd = WorldRotation.Forward.WithZ( 0 ).Normal;
 
 		float inputX = Input.Down( "forward" ) ? 1 : Input.Down( "backward" ) ? -1 : 0;
 		float inputZ = Input.Down( "left" ) ? -1 : Input.Down( "right" ) ? 1 : 0;
@@ -93,7 +93,7 @@ public sealed class ShoppingCartController : Component
 				rotAmount *= 2f;
 			}
 
-			Transform.Rotation = Transform.Rotation * Rotation.FromAxis( Vector3.Up, rotAmount );
+			WorldRotation = WorldRotation * Rotation.FromAxis( Vector3.Up, rotAmount );
 		}
 
 		float max = MaxSpeed * speedMult;
@@ -108,7 +108,7 @@ public sealed class ShoppingCartController : Component
 		_dropCooldown = Math.Max( 0, _dropCooldown - Time.Delta );
 		if ( _dropCooldown <= 0 && _rb.Velocity.Length > MinSpeedForDamage )
 		{
-			var tr = Scene.Trace.Ray( Transform.Position, Transform.Position + _rb.Velocity.Normal * 50f )
+			var tr = Scene.Trace.Ray( WorldPosition, WorldPosition + _rb.Velocity.Normal * 50f )
 				.WithAnyTags( "cart", "shelf" )
 				.WithoutTags( "player" )
 				.Run();

@@ -5,7 +5,6 @@ public sealed class BlackFridayHUD : Component
 {
 	[Property] public float UpdateInterval { get; set; } = 0.2f;
 
-	private BlackFridayGameManager _gm;
 	private TimeSince _lastUpdate;
 
 	protected override void OnFixedUpdate()

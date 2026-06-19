@@ -263,7 +263,7 @@ public sealed class {className} : Component
 					var psi = new System.Diagnostics.ProcessStartInfo
 					{
 						FileName        = "dotnet",
-						Arguments       = $"build \"{FileSystem.Mounted.GetFullPath( "." )}\" --no-restore -v quiet 2>&1",
+						Arguments       = $"build \"{FileSystem.Mounted.GetFullPath( "." )}\" --no-restore -v quiet",
 						RedirectStandardOutput = true,
 						RedirectStandardError  = true,
 						UseShellExecute = false,
@@ -289,7 +289,7 @@ public sealed class {className} : Component
 				var psi = new System.Diagnostics.ProcessStartInfo
 				{
 					FileName               = "dotnet",
-					Arguments              = $"build \"{FileSystem.Mounted.GetFullPath( "." )}\" --no-restore -v quiet 2>&1",
+					Arguments              = $"build \"{FileSystem.Mounted.GetFullPath( "." )}\" --no-restore -v quiet",
 					RedirectStandardOutput = true,
 					RedirectStandardError  = true,
 					UseShellExecute        = false,

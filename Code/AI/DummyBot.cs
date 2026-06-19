@@ -61,10 +61,10 @@ public sealed class DummyBot : Component
 			}
 		}
 
-		var dir = (_targetItem.Transform.Position - Transform.Position).Normal;
+		var dir = (_targetItem.WorldPosition - WorldPosition).Normal;
 		_rb.Velocity = dir * MoveSpeed;
 
-		float dist = Transform.Position.Distance( _targetItem.Transform.Position );
+		float dist = WorldPosition.Distance( _targetItem.WorldPosition );
 		if ( dist < CollectRange )
 		{
 			_targetItem.Destroy();
@@ -77,13 +77,13 @@ public sealed class DummyBot : Component
 
 	private void FindNearestItem()
 	{
-		var items = Scene.FindInPhysics( new Sphere( Transform.Position, 1000f ) );
+		var items = Scene.FindInPhysics( new Sphere( WorldPosition, 1000f ) );
 		float nearest = float.MaxValue;
 
 		foreach ( var obj in items )
 		{
 			if ( !obj.Tags.Has( "pickup" ) ) continue;
-			float dist = Transform.Position.Distance( obj.Transform.Position );
+			float dist = WorldPosition.Distance( obj.WorldPosition );
 			if ( dist < nearest )
 			{
 				nearest = dist;
@@ -100,10 +100,10 @@ public sealed class DummyBot : Component
 			if ( _checkoutZone == null ) return;
 		}
 
-		var dir = (_checkoutZone.Transform.Position - Transform.Position).Normal;
+		var dir = (_checkoutZone.WorldPosition - WorldPosition).Normal;
 		_rb.Velocity = dir * MoveSpeed;
 
-		float dist = Transform.Position.Distance( _checkoutZone.Transform.Position );
+		float dist = WorldPosition.Distance( _checkoutZone.WorldPosition );
 		if ( dist < CollectRange )
 		{
 			_isReturning = false;
@@ -112,7 +112,7 @@ public sealed class DummyBot : Component
 
 	private void FindCheckout()
 	{
-		var zones = Scene.FindInPhysics( new Sphere( Transform.Position, 2000f ) );
+		var zones = Scene.FindInPhysics( new Sphere( WorldPosition, 2000f ) );
 		foreach ( var obj in zones )
 		{
 			if ( obj.Tags.Has( "checkout" ) )

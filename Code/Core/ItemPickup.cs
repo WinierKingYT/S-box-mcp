@@ -29,7 +29,7 @@ public sealed class ItemPickup : Component
 		var cam = Scene.GetAllComponents<CameraComponent>().FirstOrDefault();
 		if ( cam == null ) return;
 
-		var trace = Scene.Trace.Ray( cam.Transform.Position, cam.Transform.Position + cam.Transform.Rotation.Forward * PickupRange )
+		var trace = Scene.Trace.Ray( cam.WorldPosition, cam.WorldPosition + cam.WorldRotation.Forward * PickupRange )
 			.WithAnyTags( "pickup" ).Run();
 
 		if ( trace.Hit && trace.GameObject.Tags.Has( "pickup" ) )
@@ -55,10 +55,10 @@ public sealed class ItemPickup : Component
 		_cart.ItemCount--;
 
 		var go = new GameObject( true, "Thrown" );
-		go.Transform.Position = Transform.Position + Transform.Rotation.Forward * 50f;
+		go.WorldPosition = WorldPosition + WorldRotation.Forward * 50f;
 		go.Tags.Add( "pickup" );
 		var rb = go.Components.Create<Rigidbody>();
-		rb.Velocity = Transform.Rotation.Forward * ThrowForce + Vector3.Up * 50f;
+		rb.Velocity = WorldRotation.Forward * ThrowForce + Vector3.Up * 50f;
 
 		if ( Game.IsEditor )
 		{
