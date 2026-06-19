@@ -21,19 +21,19 @@ public static class McpEditorServer
 {
 	private const int DefaultPort = 29016;
 	private const string DefaultApiKey = "sbox-ai-2026";
-	private static int _port = DefaultPort;
-	private static string _apiKey = DefaultApiKey;
+	internal static int _port = DefaultPort;
+	internal static string _apiKey = DefaultApiKey;
 	private static TcpListener _listener;
 	private static CancellationTokenSource _cts;
-	private record SseSession( NetworkStream Stream, CancellationTokenSource Cts, System.Threading.SemaphoreSlim WriteLock, string RemoteEndPoint, DateTime ConnectedAt, long RequestCount = 0, string LogLevel = "info" )
+	internal record SseSession( NetworkStream Stream, CancellationTokenSource Cts, System.Threading.SemaphoreSlim WriteLock, string RemoteEndPoint, DateTime ConnectedAt, long RequestCount = 0, string LogLevel = "info" )
 	{
 		public CancellationTokenSource ToolCts { get; set; } = new();
 		public Task CurrentToolTask { get; set; }
 		public McpBridge.Middleware.SlidingWindowRateLimiter RateLimiter { get; } = new( 60 );
 	}
-	private static readonly ConcurrentDictionary<string, SseSession> _sessions = new();
-	private record ToolDef( Func<JsonElement, Task<object>> Handler, string Description, string Group = "Editor", object InputSchema = null, object Annotations = null );
-	private static readonly ConcurrentDictionary<string, ToolDef> _tools = new();
+	internal static readonly ConcurrentDictionary<string, SseSession> _sessions = new();
+	internal record ToolDef( Func<JsonElement, Task<object>> Handler, string Description, string Group = "Editor", object InputSchema = null, object Annotations = null );
+	internal static readonly ConcurrentDictionary<string, ToolDef> _tools = new();
 	private static long _sseEventId;
 	private static CancellationTokenSource _statePollCts;
 	private static string _lastStateSnapshot = "";
@@ -41,13 +41,13 @@ public static class McpEditorServer
 	private static string _lastPhase = "", _lastDay = "", _lastAlarm = "";
 	private static readonly ConcurrentDictionary<string, string> _resourceHashes = new();
 	private static string _lastResourceListHash = "";
-	private static Func<McpContext, Task> _pipeline;
+	internal static Func<McpContext, Task> _pipeline;
 	private static volatile string _defaultLogLevel = "info";
-	private static readonly DateTime _startTime = DateTime.UtcNow;
+	internal static readonly DateTime _startTime = DateTime.UtcNow;
 
 	// ── Tool result cache (TTL-based) ─────────────────────────────────────
-	private record CacheEntry( object Result, DateTime ExpiresAt );
-	private static readonly ConcurrentDictionary<string, CacheEntry> _toolCache = new();
+	internal record CacheEntry( object Result, DateTime ExpiresAt );
+	internal static readonly ConcurrentDictionary<string, CacheEntry> _toolCache = new();
 	private static readonly HashSet<string> _cacheableTools = new()
 	{
 		"sbox_list_component_types", "sbox_get_scene_hierarchy", "sbox_scene_list"
@@ -55,8 +55,8 @@ public static class McpEditorServer
 	private const double DefaultCacheTtlSeconds = 2.0;
 
 	// ── Property watch registry ───────────────────────────────────────────
-	private record WatchEntry( string GameObjectId, string ComponentType, string PropertyName );
-	private static readonly ConcurrentDictionary<string, (WatchEntry Watch, string LastValue)> _watchedProperties = new();
+	internal record WatchEntry( string GameObjectId, string ComponentType, string PropertyName );
+	internal static readonly ConcurrentDictionary<string, (WatchEntry Watch, string LastValue)> _watchedProperties = new();
 
 	// ── Per-session rate limit (requests / minute) ────────────────────────
 	private const int DefaultRateLimit = 120;
@@ -198,18 +198,46 @@ public static class McpEditorServer
 		return _defaultLogLevel;
 	}
 
-	public static void RegisterTool( string name, string description, Func<JsonElement, object> handler, object inputSchema = null, string group = "Editor", object annotations = null )
+	public static void RegisterTool( string name, string description, Func<JsonElement, object> handler, object inputSchema = null, string group = "Editor", object annotations = null, bool runOnMainThread = true )
 	{
-		_tools[name] = new ToolDef( args => Task.FromResult( handler( args ) ), description, group, inputSchema, annotations );
+		Func<JsonElement, Task<object>> wrappedHandler;
+		if ( runOnMainThread )
+		{
+			wrappedHandler = async args =>
+			{
+				await GameTask.MainThread();
+				return handler( args );
+			};
+		}
+		else
+		{
+			wrappedHandler = args => Task.FromResult( handler( args ) );
+		}
+
+		_tools[name] = new ToolDef( wrappedHandler, description, group, inputSchema, annotations );
 		McpToolBridge.RegisterGlobalToolName( name );
-		Log.Info( $"[MCP] Tool registered: {name} \u2014 {description}" );
+		Log.Info( $"[MCP] Tool registered: {name} \u2014 {description} (mainThread: {runOnMainThread})" );
 	}
 
-	public static void RegisterToolAsync( string name, string description, Func<JsonElement, Task<object>> handler, object inputSchema = null, string group = "Editor", object annotations = null )
+	public static void RegisterToolAsync( string name, string description, Func<JsonElement, Task<object>> handler, object inputSchema = null, string group = "Editor", object annotations = null, bool runOnMainThread = true )
 	{
-		_tools[name] = new ToolDef( handler, description, group, inputSchema, annotations );
+		Func<JsonElement, Task<object>> wrappedHandler;
+		if ( runOnMainThread )
+		{
+			wrappedHandler = async args =>
+			{
+				await GameTask.MainThread();
+				return await handler( args );
+			};
+		}
+		else
+		{
+			wrappedHandler = handler;
+		}
+
+		_tools[name] = new ToolDef( wrappedHandler, description, group, inputSchema, annotations );
 		McpToolBridge.RegisterGlobalToolName( name );
-		Log.Info( $"[MCP] Async tool registered: {name} \u2014 {description}" );
+		Log.Info( $"[MCP] Async tool registered: {name} \u2014 {description} (mainThread: {runOnMainThread})" );
 	}
 
 	public static async Task BroadcastLogAsync( string level, string logger, string message, JsonElement? data = null, string sourceSessionId = null )
@@ -326,1297 +354,9 @@ public static class McpEditorServer
 		builder.Use<RateLimitMiddleware>();
 		_pipeline = builder.BuildContext( HandleMessageCoreAsync );
 
-		RegisterToolAsync( "list_tools", "List all available tools (editor + game) with optional pagination and filtering", async args =>
-		{
-			McpBridge.McpBridgeAutoInit.EnsureCreated();
-			var page = args.TryGetProperty( "page", out var pn ) ? Math.Max( 1, pn.GetInt32() ) : 1;
-			var perPage = args.TryGetProperty( "perPage", out var pp ) ? Math.Clamp( pp.GetInt32(), 1, 500 ) : 100;
-			var query = args.TryGetProperty( "query", out var q ) ? q.GetString() ?? "" : "";
-			var groupFilter = args.TryGetProperty( "group", out var g ) ? g.GetString() ?? "" : "";
-
-			var all = new List<Dictionary<string, object>>();
-			foreach ( var t in _tools )
-			{
-				if ( !string.IsNullOrEmpty( query ) && t.Key.IndexOf( query, StringComparison.OrdinalIgnoreCase ) < 0 && (t.Value.Description?.IndexOf( query, StringComparison.OrdinalIgnoreCase ) ?? -1) < 0 )
-					continue;
-				if ( !string.IsNullOrEmpty( groupFilter ) && (t.Value.Group ?? "") != groupFilter )
-					continue;
-				all.Add( new Dictionary<string, object> { ["name"] = t.Key, ["group"] = t.Value.Group ?? "Editor", ["description"] = t.Value.Description ?? "", ["annotations"] = t.Value.Annotations ?? new { } } );
-			}
-			var gameToolsJson = await McpToolBridge.ListAllGameTools();
-			if ( !string.IsNullOrEmpty( gameToolsJson ) )
-			{
-				using var gameDoc = JsonDocument.Parse( gameToolsJson );
-				foreach ( var gt in gameDoc.RootElement.EnumerateArray() )
-				{
-					var name = gt.GetProperty( "name" ).GetString();
-					if ( !string.IsNullOrEmpty( query ) && name.IndexOf( query, StringComparison.OrdinalIgnoreCase ) < 0 )
-						continue;
-					var group = gt.TryGetProperty( "group", out var grp ) ? grp.GetString() ?? "" : "";
-					if ( !string.IsNullOrEmpty( groupFilter ) && group != groupFilter )
-						continue;
-					var entry = new Dictionary<string, object> { ["name"] = name, ["group"] = group, ["description"] = gt.TryGetProperty( "description", out var d ) ? d.GetString() ?? "" : "" };
-					if ( gt.TryGetProperty( "annotations", out var ann ) && ann.ValueKind == JsonValueKind.Object )
-						entry["annotations"] = ann;
-					all.Add( entry );
-				}
-			}
-			var total = all.Count;
-			var paged = all.Skip( (page - 1) * perPage ).Take( perPage ).ToList();
-			return new { total, page, perPage, tools = paged };
-		}, new { type = "object", properties = new { page = new { type = "number", description = "Page number (1-based)" }, perPage = new { type = "number", description = "Results per page (max 500)" }, query = new { type = "string", description = "Search query" }, group = new { type = "string", description = "Filter by group" } }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
-		RegisterTool( "list_objects", "List GameObjects in the scene with optional pagination", args =>
-		{
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return "No active scene";
-			var page = args.TryGetProperty( "page", out var pn ) ? Math.Max( 1, pn.GetInt32() ) : 1;
-			var perPage = args.TryGetProperty( "perPage", out var pp ) ? Math.Clamp( pp.GetInt32(), 1, 500 ) : 50;
-			var all = scene.GetAllObjects( true ).ToList();
-			var total = all.Count;
-			var paged = all.Skip( (page - 1) * perPage ).Take( perPage ).Select( g => new { g.Name, g.Id } ).ToList();
-			return new { total, page, perPage, objects = paged };
-		}, new { type = "object", properties = new { page = new { type = "number", description = "Page number (1-based)" }, perPage = new { type = "number", description = "Results per page (max 500)" } }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
-		RegisterTool( "create_object", "Create a new GameObject", args =>
-		{
-			var name = args.GetProperty( "name" ).GetString();
-			var pos = args.TryGetProperty( "position", out var p )
-				? JsonSerializer.Deserialize<Vector3>( p.GetRawText() )
-				: Vector3.Zero;
-			var go = new GameObject( true, name );
-			go.WorldPosition = pos;
-			return new { id = go.Id.ToString(), name };
-		}, new { type = "object", properties = new { name = new { type = "string" }, position = new { type = "string", description = "x,y,z" } }, required = new[] { "name" } }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_create_gameobject", "Create a new GameObject in the scene", args =>
-		{
-			var name = args.GetProperty( "name" ).GetString();
-			var x = args.TryGetProperty( "x", out var xp ) ? xp.GetSingle() : 0f;
-			var y = args.TryGetProperty( "y", out var yp ) ? yp.GetSingle() : 0f;
-			var z = args.TryGetProperty( "z", out var zp ) ? zp.GetSingle() : 0f;
-			var go = new GameObject( true, name );
-			go.WorldPosition = new Vector3( x, y, z );
-			return new { id = go.Id.ToString(), name, position = new { x, y, z } };
-		}, new { type = "object", properties = new { name = new { type = "string", description = "Display name" }, x = new { type = "number", description = "X position" }, y = new { type = "number", description = "Y position" }, z = new { type = "number", description = "Z position" } }, required = new[] { "name" } }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_delete_gameobject", "Delete a GameObject from the scene by GUID", args =>
-		{
-			var idStr = args.GetProperty( "id" ).GetString();
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return "No active scene";
-			if ( !Guid.TryParse( idStr, out var guid ) ) return "Invalid GUID format";
-			var go = scene.Directory.FindByGuid( guid );
-			if ( go == null ) return "GameObject not found";
-			var name = go.Name;
-			go.Destroy();
-			return new { deleted = true, id = idStr, name };
-		}, new { type = "object", properties = new { id = new { type = "string", description = "GUID of the GameObject" } }, required = new[] { "id" } }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_set_transform", "Set position/rotation/scale of a GameObject", args =>
-		{
-			var idStr = args.GetProperty( "id" ).GetString();
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return "No active scene";
-			if ( !Guid.TryParse( idStr, out var guid ) ) return "Invalid GUID format";
-			var go = scene.Directory.FindByGuid( guid );
-			if ( go == null ) return "GameObject not found";
-
-			if ( args.TryGetProperty( "x", out var xp ) && args.TryGetProperty( "y", out var yp ) )
-			{
-				var z = args.TryGetProperty( "z", out var zp ) ? zp.GetSingle() : 0f;
-				var pos = new Vector3( xp.GetSingle(), yp.GetSingle(), z );
-				go.WorldPosition = pos;
-			}
-
-			if ( args.TryGetProperty( "pitch", out var pitch ) && args.TryGetProperty( "yaw", out var yaw ) )
-			{
-				var roll = args.TryGetProperty( "roll", out var r ) ? r.GetSingle() : 0f;
-				go.WorldRotation = Rotation.From( pitch.GetSingle(), yaw.GetSingle(), roll );
-			}
-
-			if ( args.TryGetProperty( "scale", out var scale ) )
-			{
-				go.WorldScale = scale.GetSingle();
-			}
-
-			return new { id = idStr, name = go.Name, position = new { x = go.WorldPosition.x, y = go.WorldPosition.y, z = go.WorldPosition.z } };
-		}, new { type = "object", properties = new { id = new { type = "string", description = "GUID of the GameObject" }, x = new { type = "number", description = "New X position" }, y = new { type = "number", description = "New Y position" }, z = new { type = "number", description = "New Z position" }, pitch = new { type = "number" }, yaw = new { type = "number" }, roll = new { type = "number" }, scale = new { type = "number" } }, required = new[] { "id" } }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_add_component", "Add a component to a GameObject by GUID", args =>
-		{
-			var idStr = args.GetProperty( "id" ).GetString();
-			var typeName = args.GetProperty( "type" ).GetString();
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return "No active scene";
-			if ( !Guid.TryParse( idStr, out var guid ) ) return "Invalid GUID format";
-			var go = scene.Directory.FindByGuid( guid );
-			if ( go == null ) return "GameObject not found";
-
-			var compTypes = TypeLibrary.GetTypes<Component>();
-			var typeDesc = compTypes.FirstOrDefault( t => string.Equals( t.Name, typeName, StringComparison.OrdinalIgnoreCase ) );
-			if ( typeDesc == null )
-				return $"Component type '{typeName}' not found";
-
-			var comp = go.Components.Create( typeDesc );
-			return new { added = true, id = idStr, name = go.Name, componentType = typeDesc.Name, componentId = comp.Id.ToString() };
-		}, new { type = "object", properties = new { id = new { type = "string", description = "GUID of the GameObject" }, type = new { type = "string", description = "Component type name (e.g. Sandbox.ModelComponent)" } }, required = new[] { "id", "type" } }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_mcp_clients", "List all connected SSE clients and their stats", _ =>
-		{
-			var now = DateTime.UtcNow;
-			var clients = _sessions.Select( kv => new
-			{
-				sessionId = kv.Key,
-				connectedForSec = Math.Round( (now - kv.Value.ConnectedAt).TotalSeconds, 1 ),
-				remoteEndPoint = kv.Value.RemoteEndPoint,
-				requestCount = kv.Value.RequestCount,
-				logLevel = kv.Value.LogLevel
-			} ).ToList();
-			return new { count = clients.Count, clients };
-		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
-
-		RegisterToolAsync( "sbox_http_get", "Make an HTTP GET request. Returns status code and body.", async args =>
-		{
-			try
-			{
-				var url = args.GetProperty( "url" ).GetString();
-				using var client = new System.Net.Http.HttpClient();
-				client.Timeout = TimeSpan.FromSeconds( 15 );
-				if ( args.TryGetProperty( "headers", out var h ) )
-				{
-					foreach ( var header in h.EnumerateObject() )
-						client.DefaultRequestHeaders.TryAddWithoutValidation( header.Name, header.Value.GetString() );
-				}
-				var resp = await client.GetAsync( url );
-				var body = await resp.Content.ReadAsStringAsync();
-				return new { success = true, statusCode = (int)resp.StatusCode, contentType = resp.Content.Headers.ContentType?.ToString(), bodyLength = body.Length, body = body.Length < 10000 ? body : body.Substring( 0, 10000 ) + "..." };
-			}
-			catch ( Exception e ) { return new { error = e.Message }; }
-		}, new { type = "object", properties = new { url = new { type = "string", description = "Target URL" }, headers = new { type = "string", description = "Optional JSON object of headers" } }, required = new[] { "url" } }, annotations: new { readOnlyHint = true, openWorldWarning = true } );
-
-		RegisterTool( "sbox_mcp_bridge_status", "Show connected game bridges and their health", _ =>
-		{
-			var bridges = McpToolBridge.GetBridgeStatus();
-			return new { count = bridges.Length, bridges = bridges.Select( b => new { b.name, errorCount = b.errors, version = b.version, toolCount = b.toolCount, capabilities = b.capabilities } ) };
-		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
-
-		RegisterTool( "get_game_state", "Get current day/phase/time", _ =>
-		{
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return "No active scene";
-			var gm = GetDynamicComponent( "BlackFridayGameManager" );
-			if ( gm == null ) return "No game manager found";
-			var day = GetPropValue<int>( gm, "CurrentDay" );
-			var phase = GetPropValue<string>( gm, "CurrentPhase" );
-			var timeLeft = GetPropValue<float>( gm, "PhaseTimeRemaining" );
-			return new { day, phase, timeLeft };
-		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
-
-		RegisterToolAsync( "sbox_http_post", "Make an HTTP POST request with JSON body.", async args =>
-		{
-			try
-			{
-				var url = args.GetProperty( "url" ).GetString();
-				var body = args.TryGetProperty( "body", out var b ) ? b.GetString() ?? "{}" : "{}";
-				using var client = new System.Net.Http.HttpClient();
-				client.Timeout = TimeSpan.FromSeconds( 15 );
-				if ( args.TryGetProperty( "headers", out var h ) )
-				{
-					foreach ( var header in h.EnumerateObject() )
-						client.DefaultRequestHeaders.TryAddWithoutValidation( header.Name, header.Value.GetString() );
-				}
-				var content = new System.Net.Http.StringContent( body, Encoding.UTF8, "application/json" );
-				var resp = await client.PostAsync( url, content );
-				var respBody = await resp.Content.ReadAsStringAsync();
-				return new { success = true, statusCode = (int)resp.StatusCode, contentType = resp.Content.Headers.ContentType?.ToString(), bodyLength = respBody.Length, body = respBody.Length <= 10000 ? respBody : respBody.Substring( 0, 10000 ) + "..." };
-			}
-			catch ( Exception e ) { return new { error = e.Message }; }
-		}, new { type = "object", properties = new { url = new { type = "string", description = "Target URL" }, body = new { type = "string", description = "JSON body" }, headers = new { type = "string", description = "Optional JSON object of headers" } }, required = new[] { "url" } }, annotations: new { destructiveHint = true, openWorldWarning = true } );
-
-		RegisterTool( "sbox_log_query", "Query recent logs with optional level and text filtering", args =>
-		{
-			var count = args.TryGetProperty( "count", out var c ) ? Math.Clamp( c.GetInt32(), 1, 500 ) : 50;
-			var minLevel = args.TryGetProperty( "minLevel", out var l ) ? l.GetString() : null;
-			var search = args.TryGetProperty( "search", out var s ) ? s.GetString() : null;
-			var entries = McpLogBridge.GetRecent( count, minLevel, search );
-			return new { count = entries.Count, entries = entries.Select( e => new { e.Level, e.Message, e.Time } ) };
-		}, new { type = "object", properties = new { count = new { type = "number", description = "Max entries (1-500)" }, minLevel = new { type = "string", description = "Minimum level: debug/info/notice/warning/error/critical" }, search = new { type = "string", description = "Text search filter" } }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
-
-		RegisterTool( "sbox_log_clear", "Clear all buffered logs", _ =>
-		{
-			var before = McpLogBridge.Count;
-			McpLogBridge.Clear();
-			return new { cleared = true, removedCount = before };
-		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_server_info", "Get MCP server configuration and status", _ =>
-		{
-			return new
-			{
-				port = _port,
-				sessions = _sessions.Count,
-				editorTools = _tools.Count,
-				uptimeMin = Math.Round( (DateTime.UtcNow - _startTime).TotalMinutes, 1 ),
-				bridges = McpToolBridge.GetBridgeStatus().Select( b => new { b.name, version = b.version, toolCount = b.toolCount } )
-			};
-		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
-
-		RegisterTool( "sbox_update_config", "Update MCP config settings at runtime (apiKey, etc.). Port changes require restart.", args =>
-		{
-			var cfg = McpConfig.Load();
-			var changes = new List<string>();
-
-			if ( args.TryGetProperty( "apiKey", out var key ) )
-			{
-				var newKey = key.GetString() ?? "";
-				if ( newKey.Length >= 8 )
-				{
-					_apiKey = newKey;
-					cfg.ApiKey = newKey;
-					changes.Add( "apiKey" );
-				}
-			}
-
-			if ( changes.Count > 0 )
-			{
-				McpConfig.Save( cfg );
-				_ = BroadcastLogAsync( "info", "server", $"Config updated: {string.Join( ", ", changes )}" );
-			}
-
-			return new { updated = changes, currentApiKey = _apiKey[..Math.Min( 4, _apiKey.Length )] + "..." };
-		}, new { type = "object", properties = new { apiKey = new { type = "string", description = "New API key (min 8 chars)" } }, required = Array.Empty<string>() }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_scene_list", "List available scene files (.sbox) on disk", _ =>
-		{
-			var scenes = ListAssetsByExt( ".sbox" );
-			var current = Game.ActiveScene?.Title ?? "none";
-			return new { currentScene = current, available = scenes, count = scenes.Count };
-		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
-
-		RegisterToolAsync( "sbox_scene_load", "Load a scene file by path. Uses runtime API discovery.", async args =>
-		{
-			var path = args.GetProperty( "path" ).GetString();
-			try
-			{
-				var tScene = TypeLibrary.GetType( "Sandbox.Scene" );
-				if ( tScene == null ) return new { error = "Sandbox.Scene type not found" };
-				var loadMethods = tScene.Methods.Where( m => m.Name == "LoadFromFile" || m.Name == "Load" || m.Name == "Open" ).ToList();
-				if ( loadMethods.Count == 0 ) return new { error = "No scene load method found", available = tScene.Methods.Select( m => m.Name ).Take( 20 ).ToList() };
-				var result = loadMethods[0].Invoke( null, new object[] { path } );
-				return new { success = result != null, method = loadMethods[0].Name, path };
-			}
-			catch ( Exception e ) { return new { error = e.Message }; }
-		}, new { type = "object", properties = new { path = new { type = "string", description = "Path to .sbox scene file" } }, required = new[] { "path" } }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_scene_create", "Create a new empty scene with a title. Uses runtime API discovery.", args =>
-		{
-			var title = args.TryGetProperty( "title", out var t ) ? t.GetString() ?? "New Scene" : "New Scene";
-			try
-			{
-				var tScene = TypeLibrary.GetType( "Sandbox.Scene" );
-				if ( tScene == null ) return new { error = "Sandbox.Scene type not found" };
-				var createMethods = tScene.Methods.Where( m => m.Name == "Create" || m.Name == "New" || m.Name == "CreateEmpty" ).ToList();
-				if ( createMethods.Count == 0 ) return new { error = "No scene create method found", available = tScene.Methods.Select( m => m.Name ).Take( 20 ).ToList() };
-				var result = createMethods[0].Invoke( null, null );
-				if ( result is Scene scene )
-					scene.Title = title;
-				return new { success = result != null, method = createMethods[0].Name, title };
-			}
-			catch ( Exception e ) { return new { error = e.Message }; }
-		}, new { type = "object", properties = new { title = new { type = "string", description = "Scene title" } }, required = Array.Empty<string>() }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_scene_save", "Save the active scene to a file path.", args =>
-		{
-			var path = args.GetProperty( "path" ).GetString();
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return new { error = "No active scene" };
-			try
-			{
-				var tScene = TypeLibrary.GetType( typeof( Scene ) );
-				var saveMethods = tScene.Methods.Where( m => m.Name == "SaveToFile" || m.Name == "Save" || m.Name == "SaveAs" ).ToList();
-				if ( saveMethods.Count == 0 ) return new { error = "No scene save method found" };
-				saveMethods[0].Invoke( scene, new object[] { path } );
-				return new { success = true, method = saveMethods[0].Name, path };
-			}
-			catch ( Exception e ) { return new { error = e.Message }; }
-		}, new { type = "object", properties = new { path = new { type = "string", description = "Path to save .sbox scene file (e.g. scenes/my_scene.sbox)" } }, required = new[] { "path" } }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_replay_history", "View recent tool execution history", _ =>
-		{
-			var history = McpReplay.GetHistory( 50 );
-			return new { count = history.Count, history = history.Select( h => new { h.Method, h.DurationMs, h.Success, h.Timestamp } ) };
-		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
-
-		RegisterTool( "sbox_replay_analytics", "Get aggregated analytics of tool usage", _ =>
-		{
-			return McpReplay.GetAnalytics();
-		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
-
-		RegisterTool( "sbox_undo", "Undo the last action", _ =>
-		{
-			return UndoRedoManager.Undo();
-		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_redo", "Redo the last undone action", _ =>
-		{
-			return UndoRedoManager.Redo();
-		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_undo_history", "View undo history", _ =>
-		{
-			var history = UndoRedoManager.GetHistory();
-			return new { count = history.Count, history };
-		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
-
-		RegisterToolAsync( "sbox_batch", "Execute multiple tool calls in sequence. Input: array of {method, params?}. Returns array of results.", async args =>
-		{
-			if ( args.ValueKind != JsonValueKind.Array )
-				return new { error = "Input must be a JSON array of objects" };
-
-			var results = new List<object>();
-			foreach ( var item in args.EnumerateArray() )
-			{
-				if ( !item.TryGetProperty( "method", out var methodProp ) )
-				{
-					results.Add( new { error = "Missing 'method' property" } );
-					continue;
-				}
-
-				var method = methodProp.GetString();
-				var itemArgs = item.TryGetProperty( "params", out var pProp ) ? pProp : default;
-
-				try
-				{
-					if ( _tools.TryGetValue( method, out var toolDef ) )
-					{
-						var res = await toolDef.Handler( itemArgs );
-						results.Add( new { method, success = true, result = res } );
-					}
-					else
-					{
-						var argsJson = itemArgs.ValueKind == JsonValueKind.Undefined ? "{}" : itemArgs.GetRawText();
-						var bridgeResponse = await McpToolBridge.RouteToolRequest( method, argsJson );
-						if ( bridgeResponse != null )
-						{
-							try
-							{
-								using var brDoc = JsonDocument.Parse( bridgeResponse );
-								if ( brDoc.RootElement.TryGetProperty( "result", out var resVal ) )
-								{
-									results.Add( new { method, success = true, result = JsonSerializer.Deserialize<object>( resVal.GetRawText() ) } );
-								}
-								else
-								{
-									results.Add( new { method, success = true, result = bridgeResponse } );
-								}
-							}
-							catch
-							{
-								results.Add( new { method, success = true, result = bridgeResponse } );
-							}
-						}
-						else
-						{
-							results.Add( new { method, success = false, error = $"Method '{method}' not found" } );
-						}
-					}
-				}
-				catch ( Exception e )
-				{
-					results.Add( new { method, success = false, error = e.Message } );
-				}
-			}
-
-			return results;
-		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_list_component_types", "List all available Component types (built-in and game-specific) in the project.", args =>
-		{
-			var query = args.TryGetProperty( "query", out var q ) ? q.GetString() ?? "" : "";
-			var types = TypeLibrary.GetTypes<Component>();
-			var all = new List<object>();
-			foreach ( var t in types )
-			{
-				if ( !string.IsNullOrEmpty( query ) && t.Name.IndexOf( query, StringComparison.OrdinalIgnoreCase ) < 0 && (t.FullName?.IndexOf( query, StringComparison.OrdinalIgnoreCase ) ?? -1) < 0 )
-					continue;
-
-				all.Add( new
-				{
-					name = t.Name,
-					fullName = t.FullName,
-					description = t.Description ?? ""
-				} );
-			}
-			return new { count = all.Count, types = all };
-		}, new { type = "object", properties = new { query = new { type = "string", description = "Optional text filter by component name" } }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
-
-		RegisterTool( "sbox_get_component_properties", "Get all readable properties and their values of a component on a GameObject.", args =>
-		{
-			var idStr = args.GetProperty( "id" ).GetString();
-			var componentName = args.GetProperty( "component" ).GetString();
-
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return new { error = "No active scene" };
-			if ( !Guid.TryParse( idStr, out var guid ) ) return new { error = "Invalid GUID format" };
-			var go = scene.Directory.FindByGuid( guid );
-			if ( go == null ) return new { error = "GameObject not found" };
-
-			var typeDesc = McpBridge.Tools.AssetTools.FindComponentType( componentName );
-			if ( typeDesc == null ) return new { error = $"Component type '{componentName}' not found" };
-
-			var comp = go.Components.Get( typeDesc.TargetType );
-			if ( comp == null ) return new { error = $"Component '{componentName}' not attached to this GameObject" };
-
-			var properties = new Dictionary<string, object>();
-			foreach ( var prop in typeDesc.Properties )
-			{
-				if ( !prop.CanRead ) continue;
-				try
-				{
-					var val = prop.GetValue( comp );
-					if ( val != null && val is not Component && val is not GameObject )
-					{
-						properties[prop.Name] = val;
-					}
-					else if ( val != null )
-					{
-						properties[prop.Name] = val.ToString();
-					}
-					else
-					{
-						properties[prop.Name] = null;
-					}
-				}
-				catch ( Exception e )
-				{
-					properties[prop.Name] = $"<Error: {e.Message}>";
-				}
-			}
-
-			return new { id = idStr, gameObjectName = go.Name, component = typeDesc.Name, properties };
-		}, new { type = "object", properties = new { id = new { type = "string", description = "GUID of the GameObject" }, component = new { type = "string", description = "Component type name (e.g. ModelComponent)" } }, required = new[] { "id", "component" } }, annotations: new { readOnlyHint = true } );
-
-		RegisterTool( "sbox_set_component_property", "Set a property value of a component on a GameObject.", args =>
-		{
-			var idStr = args.GetProperty( "id" ).GetString();
-			var componentName = args.GetProperty( "component" ).GetString();
-			var propertyName = args.GetProperty( "property" ).GetString();
-			var valueVal = args.GetProperty( "value" );
-
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return new { error = "No active scene" };
-			if ( !Guid.TryParse( idStr, out var guid ) ) return new { error = "Invalid GUID format" };
-			var go = scene.Directory.FindByGuid( guid );
-			if ( go == null ) return new { error = "GameObject not found" };
-
-			var typeDesc = McpBridge.Tools.AssetTools.FindComponentType( componentName );
-			if ( typeDesc == null ) return new { error = $"Component type '{componentName}' not found" };
-
-			var comp = go.Components.Get( typeDesc.TargetType );
-			if ( comp == null ) return new { error = $"Component '{componentName}' not attached to this GameObject" };
-
-			var prop = typeDesc.Properties.FirstOrDefault( p => string.Equals( p.Name, propertyName, StringComparison.OrdinalIgnoreCase ) );
-			if ( prop == null ) return new { error = $"Property '{propertyName}' not found on component '{componentName}'" };
-			if ( !prop.CanWrite ) return new { error = $"Property '{propertyName}' is read-only" };
-
-			try
-			{
-				var converted = McpBridge.Tools.AssetTools.ConvertValue( valueVal, prop.PropertyType );
-				if ( converted == null && prop.PropertyType.IsValueType && Nullable.GetUnderlyingType( prop.PropertyType ) == null )
-				{
-					return new { error = $"Cannot set null value to non-nullable type '{prop.PropertyType.Name}'" };
-				}
-
-				prop.SetValue( comp, converted );
-				return new { success = true, id = idStr, gameObjectName = go.Name, component = typeDesc.Name, property = prop.Name, newValue = converted?.ToString() };
-			}
-			catch ( Exception e )
-			{
-				return new { error = $"Failed to set property: {e.Message}" };
-			}
-		}, new { type = "object", properties = new { id = new { type = "string", description = "GUID of the GameObject" }, component = new { type = "string", description = "Component type name" }, property = new { type = "string", description = "Property name" }, value = new { type = "string", description = "Value to set (can be any type: string, number, bool, object for Vector3/Rotation)" } }, required = new[] { "id", "component", "property", "value" } }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_call_component_method", "Invoke a method on a component on a GameObject.", args =>
-		{
-			var idStr = args.GetProperty( "id" ).GetString();
-			var componentName = args.GetProperty( "component" ).GetString();
-			var methodName = args.GetProperty( "method" ).GetString();
-
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return new { error = "No active scene" };
-			if ( !Guid.TryParse( idStr, out var guid ) ) return new { error = "Invalid GUID format" };
-			var go = scene.Directory.FindByGuid( guid );
-			if ( go == null ) return new { error = "GameObject not found" };
-
-			var typeDesc = McpBridge.Tools.AssetTools.FindComponentType( componentName );
-			if ( typeDesc == null ) return new { error = $"Component type '{componentName}' not found" };
-
-			var comp = go.Components.Get( typeDesc.TargetType );
-			if ( comp == null ) return new { error = $"Component '{componentName}' not attached to this GameObject" };
-
-			var method = typeDesc.Methods.FirstOrDefault( m => string.Equals( m.Name, methodName, StringComparison.OrdinalIgnoreCase ) );
-			if ( method == null ) return new { error = $"Method '{methodName}' not found on component '{componentName}'" };
-
-			var methodParams = new List<object>();
-			if ( args.TryGetProperty( "params", out var pEl ) && pEl.ValueKind == JsonValueKind.Array )
-			{
-				var parameters = method.Parameters;
-				var idx = 0;
-				foreach ( var paramEl in pEl.EnumerateArray() )
-				{
-					if ( idx >= parameters.Length ) break;
-					var paramType = parameters[idx].ParameterType;
-					var converted = McpBridge.Tools.AssetTools.ConvertValue( paramEl, paramType );
-					methodParams.Add( converted );
-					idx++;
-				}
-				while ( idx < parameters.Length )
-				{
-					methodParams.Add( null );
-					idx++;
-				}
-			}
-			else
-			{
-				if ( method.Parameters.Length > 0 && method.Parameters.Any( p => !p.IsOptional ) )
-				{
-					return new { error = $"Method '{methodName}' requires parameters but none were provided." };
-				}
-			}
-
-			try
-			{
-				var res = method.Invoke( comp, methodParams.ToArray() );
-				return new { success = true, id = idStr, gameObjectName = go.Name, component = typeDesc.Name, method = method.Name, returnValue = res?.ToString() };
-			}
-			catch ( Exception e )
-			{
-				return new { error = $"Failed to invoke method: {e.Message}" };
-			}
-		}, new { type = "object", properties = new { id = new { type = "string", description = "GUID of the GameObject" }, component = new { type = "string", description = "Component type name" }, method = new { type = "string", description = "Method name to invoke" }, @params = new { type = "array", description = "Optional array of parameters to pass to the method" } }, required = new[] { "id", "component", "method" } }, annotations: new { destructiveHint = true } );
-
-		RegisterToolAsync( "sbox_compile_project", "Compile the C# project and return structured build errors/warnings.", async _ =>
-		{
-			try
-			{
-				var pInfo = new ProcessStartInfo
-				{
-					FileName = "dotnet",
-					Arguments = "build \"Code/blackfriday2.csproj\" --nologo",
-					WorkingDirectory = Environment.CurrentDirectory,
-					RedirectStandardOutput = true,
-					RedirectStandardError = true,
-					UseShellExecute = false,
-					CreateNoWindow = true
-				};
-
-				using var proc = Process.Start( pInfo );
-				if ( proc == null ) return new { success = false, error = "Failed to start dotnet build process" };
-
-				var stdoutTask = proc.StandardOutput.ReadToEndAsync();
-				var stderrTask = proc.StandardError.ReadToEndAsync();
-
-				await Task.WhenAll( stdoutTask, stderrTask );
-				proc.WaitForExit();
-
-				var stdout = stdoutTask.Result;
-				var stderr = stderrTask.Result;
-				var errors = new List<object>();
-				var warnings = new List<object>();
-
-				var lines = stdout.Split( new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries );
-				foreach ( var line in lines )
-				{
-					if ( line.Contains( "): error " ) )
-					{
-						var parsed = ParseBuildMessage( line, "error" );
-						if ( parsed != null ) errors.Add( parsed );
-					}
-					else if ( line.Contains( "): warning " ) )
-					{
-						var parsed = ParseBuildMessage( line, "warning" );
-						if ( parsed != null ) warnings.Add( parsed );
-					}
-				}
-
-				return new
-				{
-					success = proc.ExitCode == 0,
-					exitCode = proc.ExitCode,
-					errorCount = errors.Count,
-					warningCount = warnings.Count,
-					errors,
-					warnings,
-					rawOutput = stdout.Length > 5000 ? stdout[..5000] + "..." : stdout
-				};
-			}
-			catch ( Exception e )
-			{
-				return new { success = false, error = e.Message };
-			}
-		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
-
-		RegisterTool( "sbox_get_scene_hierarchy", "Get a tree-like representation of all GameObjects in the active scene.", _ =>
-		{
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return new { error = "No active scene" };
-
-			var rootNodes = new List<object>();
-			foreach ( var go in scene.Children )
-			{
-				if ( go.IsValid() ) rootNodes.Add( BuildSceneNode( go ) );
-			}
-
-			return new { activeScene = scene.Title ?? "Untitled", rootNodes };
-		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
-
-		RegisterTool( "sbox_instantiate_prefab", "Instantiate a prefab file in the scene.", args =>
-		{
-			var path = args.GetProperty( "path" ).GetString();
-			var x = args.TryGetProperty( "x", out var xp ) ? xp.GetSingle() : 0f;
-			var y = args.TryGetProperty( "y", out var yp ) ? yp.GetSingle() : 0f;
-			var z = args.TryGetProperty( "z", out var zp ) ? zp.GetSingle() : 0f;
-			var parentGuidStr = args.TryGetProperty( "parentGuid", out var pg ) ? pg.GetString() : null;
-
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return new { error = "No active scene" };
-
-			GameObject parentGo = null;
-			if ( !string.IsNullOrEmpty( parentGuidStr ) && Guid.TryParse( parentGuidStr, out var parentGuid ) )
-			{
-				parentGo = scene.Directory.FindByGuid( parentGuid );
-				if ( parentGo == null ) return new { error = $"Parent GameObject with GUID '{parentGuidStr}' not found" };
-			}
-
-			try
-			{
-				var resourceLibType = TypeLibrary.GetType( "Sandbox.ResourceLibrary" );
-				var getMethod = resourceLibType?.Methods.FirstOrDefault( m => m.Name == "Get" );
-				if ( getMethod == null ) return new { error = "ResourceLibrary.Get not found" };
-
-				var prefab = getMethod.Invoke( null, new object[] { path } );
-				if ( prefab == null ) return new { error = $"Prefab not found at path: {path}" };
-
-				var sceneUtilType = TypeLibrary.GetType( "Sandbox.SceneUtility" );
-				var getSceneMethod = sceneUtilType?.Methods.FirstOrDefault( m => m.Name == "GetPrefabScene" );
-				if ( getSceneMethod == null ) return new { error = "SceneUtility.GetPrefabScene not found" };
-
-				var prefabScene = getSceneMethod.Invoke( null, new object[] { prefab } );
-				if ( prefabScene == null ) return new { error = "GetPrefabScene returned null" };
-
-				var psTd = TypeLibrary.GetType( prefabScene.GetType() );
-				var cloneMethod = psTd?.Methods.FirstOrDefault( m => m.Name == "Clone" );
-				if ( cloneMethod == null ) return new { error = "Clone method not found on prefab scene" };
-
-				var go = cloneMethod.Invoke( prefabScene, Array.Empty<object>() ) as GameObject;
-				if ( go == null || !go.IsValid() ) return new { error = "Failed to clone prefab scene" };
-
-				if ( parentGo != null )
-				{
-					go.Parent = parentGo;
-				}
-				go.WorldPosition = new Vector3( x, y, z );
-
-				return new { success = true, id = go.Id.ToString(), name = go.Name, position = new { x, y, z } };
-			}
-			catch ( Exception e )
-			{
-				return new { error = $"Instantiation failed: {e.Message}" };
-			}
-		}, new { type = "object", properties = new { path = new { type = "string", description = "Path to the .prefab file (e.g. prefabs/dummy_bot.prefab)" }, x = new { type = "number", description = "Target X position" }, y = new { type = "number", description = "Target Y position" }, z = new { type = "number", description = "Target Z position" }, parentGuid = new { type = "string", description = "Optional GUID of the parent GameObject" } }, required = new[] { "path" } }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_search_assets", "Search for assets (models, prefabs, sounds, materials) in the project.", args =>
-		{
-			var query = args.TryGetProperty( "query", out var q ) ? q.GetString() ?? "" : "";
-			var ext = args.TryGetProperty( "extension", out var e ) ? e.GetString() ?? "" : "";
-
-			var exts = string.IsNullOrEmpty( ext ) 
-				? new[] { ".prefab", ".vmdl", ".vmat", ".vsnd", ".vtex" } 
-				: new[] { ext.StartsWith(".") ? ext : "." + ext };
-
-			var files = new List<string>();
-			foreach ( var extension in exts )
-			{
-				try
-				{
-					var found = FileSystem.Mounted.FindFile( ".", $"*{extension}", true );
-					foreach ( var f in found )
-					{
-						var normalPath = f.Replace( '\\', '/' );
-						if ( string.IsNullOrEmpty( query ) || normalPath.IndexOf( query, StringComparison.OrdinalIgnoreCase ) >= 0 )
-						{
-							files.Add( normalPath );
-						}
-					}
-				}
-				catch { }
-			}
-
-			var limited = files.Take( 100 ).ToList();
-			return new { totalCount = files.Count, returnedCount = limited.Count, assets = limited };
-		}, new { type = "object", properties = new { query = new { type = "string", description = "Text to search in asset paths" }, extension = new { type = "string", description = "Optional asset extension (e.g. .prefab, .vmdl, .vsnd)" } }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true } );
-
-		RegisterTool( "sbox_inspect_prefab", "Read and inspect a .prefab file structure without instantiating it.", args =>
-		{
-			var path = args.GetProperty( "path" ).GetString();
-			try
-			{
-				if ( !FileSystem.Mounted.FileExists( path ) )
-					return new { error = $"Prefab file not found: {path}" };
-
-				var jsonText = FileSystem.Mounted.ReadAllText( path );
-				using var doc = JsonDocument.Parse( jsonText );
-				return new { path, structure = doc.RootElement.Clone() };
-			}
-			catch ( Exception e )
-			{
-				return new { error = $"Failed to read prefab: {e.Message}" };
-			}
-		}, new { type = "object", properties = new { path = new { type = "string", description = "Path to the .prefab file" } }, required = new[] { "path" } }, annotations: new { readOnlyHint = true } );
-
-		RegisterTool( "sbox_create_component_class", "Create a new C# Component script template in the project's Code folder.", args =>
-		{
-			var name = args.GetProperty( "name" ).GetString().Trim();
-			var subFolder = args.TryGetProperty( "subFolder", out var sf ) ? sf.GetString() ?? "" : "";
-
-			var className = new string( name.Where( char.IsLetterOrDigit ).ToArray() );
-			if ( string.IsNullOrEmpty( className ) || !char.IsLetter( className[0] ) )
-				return new { error = "Invalid component name. Must start with a letter and contain only alphanumeric characters." };
-
-			var folderPath = string.IsNullOrEmpty( subFolder ) 
-				? System.IO.Path.Combine( Environment.CurrentDirectory, "Code" ) 
-				: System.IO.Path.Combine( Environment.CurrentDirectory, "Code", subFolder );
-
-			var filePath = System.IO.Path.Combine( folderPath, $"{className}.cs" );
-
-			try
-			{
-				if ( !System.IO.Directory.Exists( folderPath ) )
-				{
-					System.IO.Directory.CreateDirectory( folderPath );
-				}
-
-				if ( System.IO.File.Exists( filePath ) )
-					return new { error = $"File already exists at: {filePath.Replace( '\\', '/' )}" };
-
-				var template = $@"using Sandbox;
-using System;
-
-{( string.IsNullOrEmpty( subFolder ) ? "namespace Sandbox;" : $"namespace Sandbox.{subFolder.Replace( '/', '.' ).Replace( '\\', '.' )};" )}
-
-public sealed class {className} : Component
-{{
-	[Property] public float Speed {{ get; set; }} = 100f;
-
-	protected override void OnStart()
-	{{
-		Log.Info( ""{className} started!"" );
-	}}
-
-	protected override void OnUpdate()
-	{{
-	}}
-
-	protected override void OnFixedUpdate()
-	{{
-	}}
-}}
-";
-
-				System.IO.File.WriteAllText( filePath, template );
-				return new { success = true, filePath = filePath.Replace( '\\', '/' ), className };
-			}
-			catch ( Exception e )
-			{
-				return new { error = $"Failed to create component class: {e.Message}" };
-			}
-		}, new { type = "object", properties = new { name = new { type = "string", description = "Name of the class (e.g. MyTriggerListener)" }, subFolder = new { type = "string", description = "Optional subfolder inside Code/ (e.g. Player, AI, UI)" } }, required = new[] { "name" } }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_run_console_command", "Run a console command in the game/editor system.", args =>
-		{
-			var cmd = args.GetProperty( "command" ).GetString();
-			try
-			{
-				var tConsole = TypeLibrary.GetType( "Sandbox.ConsoleSystem" ) ?? TypeLibrary.GetType( "Sandbox.Editor.Console" );
-				if ( tConsole == null ) return new { error = "Console system type not found" };
-
-				var runMethod = tConsole.Methods.FirstOrDefault( m => m.Name == "Run" && m.Parameters.Length == 1 && m.Parameters[0].ParameterType == typeof( string ) );
-				if ( runMethod == null ) return new { error = "ConsoleSystem.Run(string) method not found" };
-
-				runMethod.Invoke( null, new object[] { cmd } );
-				return new { success = true, command = cmd };
-			}
-			catch ( Exception e )
-			{
-				return new { error = $"Failed to run command: {e.Message}" };
-			}
-		}, new { type = "object", properties = new { command = new { type = "string", description = "The console command string to execute (e.g. noclip)" } }, required = new[] { "command" } }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_focus_camera", "Move the main scene camera to focus on a target GameObject.", args =>
-		{
-			var idStr = args.GetProperty( "id" ).GetString();
-			var distance = args.TryGetProperty( "distance", out var distProp ) ? distProp.GetSingle() : 150f;
-
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return new { error = "No active scene" };
-			if ( !Guid.TryParse( idStr, out var guid ) ) return new { error = "Invalid GUID format" };
-			var go = scene.Directory.FindByGuid( guid );
-			if ( go == null ) return new { error = "GameObject not found" };
-
-			var camera = scene.Camera;
-			if ( camera == null ) return new { error = "No camera component found in active scene" };
-
-			var targetPos = go.WorldPosition;
-			var offset = new Vector3( -1f, 1f, 0.75f ).Normal * distance;
-			camera.WorldPosition = targetPos + offset;
-
-			var lookDir = (targetPos - camera.WorldPosition).Normal;
-			camera.WorldRotation = Rotation.LookAt( lookDir, Vector3.Up );
-
-			return new { success = true, focusedObjectId = idStr, focusedObjectName = go.Name, cameraPosition = new { x = camera.WorldPosition.x, y = camera.WorldPosition.y, z = camera.WorldPosition.z } };
-		}, new { type = "object", properties = new { id = new { type = "string", description = "GUID of the GameObject to focus on" }, distance = new { type = "number", description = "Distance from camera to target" } }, required = new[] { "id" } }, annotations: new { destructiveHint = true } );
-
-		RegisterTool( "sbox_find_by_component", "Find all GameObjects in the scene that have a specific component.", args =>
-		{
-			var componentName = args.GetProperty( "component" ).GetString();
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return new { error = "No active scene" };
-
-			var typeDesc = McpBridge.Tools.AssetTools.FindComponentType( componentName );
-			if ( typeDesc == null ) return new { error = $"Component type '{componentName}' not found" };
-
-			var gameObjects = new List<object>();
-			foreach ( var go in scene.GetAllObjects( true ) )
-			{
-				var comp = go.Components.Get( typeDesc.TargetType );
-				if ( comp.IsValid() )
-				{
-					gameObjects.Add( new { id = go.Id.ToString(), name = go.Name, position = new { x = go.WorldPosition.x, y = go.WorldPosition.y, z = go.WorldPosition.z } });
-				}
-			}
-
-			return new { count = gameObjects.Count, component = typeDesc.Name, gameObjects };
-		}, new { type = "object", properties = new { component = new { type = "string", description = "Component name (e.g. ModelComponent)" } }, required = new[] { "component" } }, annotations: new { readOnlyHint = true } );
-
-		RegisterTool( "sbox_find_by_name", "Find all GameObjects in the scene by name (wildcard/substring search).", args =>
-		{
-			var nameQuery = args.GetProperty( "name" ).GetString();
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return new { error = "No active scene" };
-
-			var list = new List<object>();
-			foreach ( var go in scene.GetAllObjects( true ) )
-			{
-				if ( go.IsValid() && go.Name.IndexOf( nameQuery, StringComparison.OrdinalIgnoreCase ) >= 0 )
-				{
-					list.Add( new
-					{
-						id = go.Id.ToString(),
-						name = go.Name,
-						position = new { x = go.WorldPosition.x, y = go.WorldPosition.y, z = go.WorldPosition.z }
-					} );
-				}
-			}
-			return new { count = list.Count, query = nameQuery, gameObjects = list };
-		}, new { type = "object", properties = new { name = new { type = "string", description = "GameObject name or substring to search for" } }, required = new[] { "name" } }, annotations: new { readOnlyHint = true } );
-
-		RegisterTool( "sbox_raycast", "Perform a physics raycast in the active scene.", args =>
-		{
-			var startX = args.GetProperty( "startX" ).GetSingle();
-			var startY = args.GetProperty( "startY" ).GetSingle();
-			var startZ = args.GetProperty( "startZ" ).GetSingle();
-			var endX = args.GetProperty( "endX" ).GetSingle();
-			var endY = args.GetProperty( "endY" ).GetSingle();
-			var endZ = args.GetProperty( "endZ" ).GetSingle();
-
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return new { error = "No active scene" };
-
-			try
-			{
-				var start = new Vector3( startX, startY, startZ );
-				var end = new Vector3( endX, endY, endZ );
-				var tr = scene.Trace.Ray( start, end ).Run();
-
-				return new
-				{
-					hit = tr.Hit,
-					distance = tr.Distance,
-					hitPosition = new { x = tr.EndPosition.x, y = tr.EndPosition.y, z = tr.EndPosition.z },
-					normal = new { x = tr.Normal.x, y = tr.Normal.y, z = tr.Normal.z },
-					hitGameObjectId = tr.GameObject.IsValid() ? tr.GameObject.Id.ToString() : null,
-					hitGameObjectName = tr.GameObject.IsValid() ? tr.GameObject.Name : null
-				};
-			}
-			catch ( Exception e )
-			{
-				return new { error = $"Raycast failed: {e.Message}" };
-			}
-		}, new { type = "object", properties = new { startX = new { type = "number" }, startY = new { type = "number" }, startZ = new { type = "number" }, endX = new { type = "number" }, endY = new { type = "number" }, endZ = new { type = "number" } }, required = new[] { "startX", "startY", "startZ", "endX", "endY", "endZ" } }, annotations: new { readOnlyHint = true } );
-
-		RegisterTool( "sbox_apply_physics_impulse", "Apply a force impulse to a GameObject's Rigidbody.", args =>
-		{
-			var idStr = args.GetProperty( "id" ).GetString();
-			var forceVal = args.GetProperty( "force" );
-
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return new { error = "No active scene" };
-			if ( !Guid.TryParse( idStr, out var guid ) ) return new { error = "Invalid GUID format" };
-			var go = scene.Directory.FindByGuid( guid );
-			if ( go == null ) return new { error = "GameObject not found" };
-
-			var rb = go.Components.Get<Rigidbody>();
-			if ( !rb.IsValid() ) return new { error = "No Rigidbody component found on this GameObject" };
-
-			try
-			{
-				var forceVec = (Vector3)McpBridge.Tools.AssetTools.ConvertValue( forceVal, typeof( Vector3 ) );
-				rb.ApplyImpulse( forceVec );
-				return new { success = true, id = idStr, gameObjectName = go.Name, appliedImpulse = forceVec.ToString() };
-			}
-			catch ( Exception e )
-			{
-				return new { error = $"Failed to apply impulse: {e.Message}" };
-			}
-		}, new { type = "object", properties = new { id = new { type = "string", description = "GUID of the GameObject" }, force = new { type = "string", description = "Force vector as 'x,y,z' or JSON object" } }, required = new[] { "id", "force" } }, annotations: new { destructiveHint = true } );
-		// ════════════════════════════════════════════════════════════════════
-		// KATEGORİ 1 — Yeni Sahne Araçları
-		// ════════════════════════════════════════════════════════════════════
-
-		RegisterTool( "sbox_duplicate_gameobject", "Duplicate a GameObject in the scene by GUID.", args =>
-		{
-			var idStr  = args.GetProperty( "id" ).GetString();
-			var newName = args.TryGetProperty( "name", out var np ) ? np.GetString() : null;
-			var scene  = Game.ActiveScene;
-			if ( scene == null ) return new { error = "No active scene" };
-			if ( !Guid.TryParse( idStr, out var guid ) ) return new { error = "Invalid GUID" };
-			var go = scene.Directory.FindByGuid( guid );
-			if ( !go.IsValid() ) return new { error = "GameObject not found" };
-			var clone = go.Clone();
-			if ( !string.IsNullOrEmpty( newName ) ) clone.Name = newName;
-			return new { success = true, originalId = idStr, newId = clone.Id.ToString(), name = clone.Name };
-		}, new { type = "object", properties = new { id = new { type = "string", description = "Source GameObject GUID" }, name = new { type = "string", description = "Optional name for the clone" } }, required = new[] { "id" } } );
-
-		RegisterTool( "sbox_rename_gameobject", "Rename a GameObject in the scene by GUID.", args =>
-		{
-			var idStr   = args.GetProperty( "id" ).GetString();
-			var newName = args.GetProperty( "name" ).GetString();
-			var scene   = Game.ActiveScene;
-			if ( scene == null ) return new { error = "No active scene" };
-			if ( !Guid.TryParse( idStr, out var guid ) ) return new { error = "Invalid GUID" };
-			var go = scene.Directory.FindByGuid( guid );
-			if ( !go.IsValid() ) return new { error = "GameObject not found" };
-			var oldName = go.Name;
-			go.Name = newName;
-			return new { success = true, id = idStr, oldName, newName };
-		}, new { type = "object", properties = new { id = new { type = "string", description = "GameObject GUID" }, name = new { type = "string", description = "New name" } }, required = new[] { "id", "name" } } );
-
-		RegisterTool( "sbox_set_parent", "Set the parent of a GameObject. Pass null parentId to move to scene root.", args =>
-		{
-			var idStr       = args.GetProperty( "id" ).GetString();
-			var parentIdStr = args.TryGetProperty( "parentId", out var pp ) ? pp.GetString() : null;
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return new { error = "No active scene" };
-			if ( !Guid.TryParse( idStr, out var guid ) ) return new { error = "Invalid child GUID" };
-			var go = scene.Directory.FindByGuid( guid );
-			if ( !go.IsValid() ) return new { error = "Child GameObject not found" };
-
-			if ( string.IsNullOrEmpty( parentIdStr ) || parentIdStr == "null" )
-			{
-				go.Parent = null;
-				return new { success = true, id = idStr, name = go.Name, newParent = (string)null };
-			}
-
-			if ( !Guid.TryParse( parentIdStr, out var parentGuid ) ) return new { error = "Invalid parent GUID" };
-			var parent = scene.Directory.FindByGuid( parentGuid );
-			if ( !parent.IsValid() ) return new { error = "Parent GameObject not found" };
-			go.Parent = parent;
-			return new { success = true, id = idStr, name = go.Name, newParent = parent.Name, newParentId = parentIdStr };
-		}, new { type = "object", properties = new { id = new { type = "string", description = "Child GameObject GUID" }, parentId = new { type = "string", description = "Parent GUID, or null for scene root" } }, required = new[] { "id" } } );
-
-		// ════════════════════════════════════════════════════════════════════
-		// KATEGORİ 1 — Dosya Okuma / Yazma
-		// ════════════════════════════════════════════════════════════════════
-
-		RegisterTool( "sbox_read_file", "Read any file from the project directory. Returns text content.", args =>
-		{
-			var relPath = args.GetProperty( "path" ).GetString()?.Replace( "\\", "/" ) ?? "";
-			try
-			{
-				string text = null;
-				if ( FileSystem.Mounted.FileExists( relPath ) )
-				{
-					text = FileSystem.Mounted.ReadAllText( relPath );
-				}
-				else
-				{
-					var absPath = System.IO.Path.Combine( FileSystem.Mounted.GetFullPath( "." ), relPath.Replace( "/", System.IO.Path.DirectorySeparatorChar.ToString() ) );
-					if ( !System.IO.File.Exists( absPath ) ) return new { error = $"File not found: {relPath}" };
-					text = System.IO.File.ReadAllText( absPath );
-				}
-				var lines = text.Split( '\n' );
-				var maxLines = args.TryGetProperty( "maxLines", out var ml ) ? ml.GetInt32() : 300;
-				var truncated = lines.Length > maxLines;
-				var preview = string.Join( "\n", lines.Take( maxLines ) );
-				return new { path = relPath, lineCount = lines.Length, sizeBytes = text.Length, truncated, content = preview };
-			}
-			catch ( Exception e ) { return new { error = e.Message }; }
-		}, new { type = "object", properties = new { path = new { type = "string", description = "Relative file path e.g. Code/Core/MyScript.cs" }, maxLines = new { type = "integer", description = "Max lines to return (default 300)" } }, required = new[] { "path" } } );
-
-		RegisterTool( "sbox_write_file", "Write or create a file in the project. Path is relative to the project root.", args =>
-		{
-			var relPath = args.GetProperty( "path" ).GetString()?.Replace( "/", System.IO.Path.DirectorySeparatorChar.ToString() ) ?? "";
-			var content = args.GetProperty( "content" ).GetString() ?? "";
-			if ( relPath.Contains( ".." ) ) return new { error = "Path traversal not allowed" };
-			try
-			{
-				var absPath = System.IO.Path.Combine( FileSystem.Mounted.GetFullPath( "." ), relPath );
-				var dirPath = System.IO.Path.GetDirectoryName( absPath );
-				if ( !string.IsNullOrEmpty( dirPath ) ) System.IO.Directory.CreateDirectory( dirPath );
-				System.IO.File.WriteAllText( absPath, content );
-				return new { success = true, path = relPath, absPath, sizeBytes = content.Length };
-			}
-			catch ( Exception e ) { return new { error = e.Message }; }
-		}, new { type = "object", properties = new { path = new { type = "string", description = "Relative path to write, e.g. Code/MyScript.cs" }, content = new { type = "string", description = "Full file content to write" } }, required = new[] { "path", "content" } }, annotations: new { destructiveHint = true } );
-
-		// ════════════════════════════════════════════════════════════════════
-		// KATEGORİ 2 — Kod Okuma / Patch
-		// ════════════════════════════════════════════════════════════════════
-
-		RegisterTool( "sbox_read_script", "Read a C# script file with line numbers and a class/method outline.", args =>
-		{
-			var relPath = args.GetProperty( "path" ).GetString()?.Replace( "\\", "/" ) ?? "";
-			try
-			{
-				string text = null;
-				if ( FileSystem.Mounted.FileExists( relPath ) )
-				{
-					text = FileSystem.Mounted.ReadAllText( relPath );
-				}
-				else
-				{
-					var absPath = System.IO.Path.Combine( FileSystem.Mounted.GetFullPath( "." ), relPath.Replace( "/", System.IO.Path.DirectorySeparatorChar.ToString() ) );
-					if ( !System.IO.File.Exists( absPath ) ) return new { error = $"File not found: {relPath}" };
-					text = System.IO.File.ReadAllText( absPath );
-				}
-				var path = relPath;
-
-				var lines     = text.Split( '\n' );
-				var maxLines  = args.TryGetProperty( "maxLines", out var ml ) ? ml.GetInt32() : 300;
-				var startLine = args.TryGetProperty( "startLine", out var sl ) ? sl.GetInt32() - 1 : 0;
-				startLine = Math.Max( 0, Math.Min( startLine, lines.Length - 1 ) );
-				var endLine = Math.Min( startLine + maxLines, lines.Length );
-
-				// Build numbered snippet
-				var sb = new System.Text.StringBuilder();
-				for ( int i = startLine; i < endLine; i++ )
-					sb.AppendLine( $"{i + 1,4}: {lines[i]}" );
-
-				// Quick outline: find class/method/property declarations
-				var outline = new List<string>();
-				for ( int i = 0; i < lines.Length; i++ )
-				{
-					var t = lines[i].Trim();
-					if ( t.StartsWith( "public " ) || t.StartsWith( "private " ) || t.StartsWith( "protected " ) || t.StartsWith( "internal " ) )
-					{
-						if ( t.Contains( " class " ) || t.Contains( " void " ) || t.Contains( " Task " ) || t.Contains( " async " ) || t.Contains( " bool " ) || t.Contains( " int " ) || t.Contains( " float " ) || t.Contains( " string " ) )
-							outline.Add( $"L{i + 1}: {t.Substring( 0, Math.Min( t.Length, 90 ) )}" );
-					}
-				}
-
-				return new
-				{
-					path,
-					totalLines = lines.Length,
-					shownRange = $"{startLine + 1}-{endLine}",
-					truncated  = endLine < lines.Length,
-					outline    = outline.Take( 40 ),
-					content    = sb.ToString()
-				};
-			}
-			catch ( Exception e ) { return new { error = e.Message }; }
-		}, new { type = "object", properties = new { path = new { type = "string", description = "Relative .cs file path" }, startLine = new { type = "integer", description = "First line to read (1-indexed, default 1)" }, maxLines = new { type = "integer", description = "Lines to return (default 300)" } }, required = new[] { "path" } } );
-
-		RegisterToolAsync( "sbox_patch_script", "Replace a text fragment in a C# script file. After patching, compiles the project and returns build result.", async args =>
-		{
-			var path    = args.GetProperty( "path" ).GetString()?.Replace( "\\", "/" ) ?? "";
-			var oldText = args.GetProperty( "old_text" ).GetString() ?? "";
-			var newText = args.GetProperty( "new_text" ).GetString() ?? "";
-
-			if ( path.Contains( ".." ) ) return (object)new { error = "Path traversal not allowed" };
-
-			try
-			{
-				string original = null;
-				string absPath;
-				if ( FileSystem.Mounted.FileExists( path ) )
-				{
-					absPath  = FileSystem.Mounted.GetFullPath( path );
-					original = System.IO.File.ReadAllText( absPath );
-				}
-				else
-				{
-					absPath  = System.IO.Path.Combine( FileSystem.Mounted.GetFullPath( "." ), path.Replace( "/", System.IO.Path.DirectorySeparatorChar.ToString() ) );
-					if ( !System.IO.File.Exists( absPath ) ) return new { error = $"File not found: {path}" };
-					original = System.IO.File.ReadAllText( absPath );
-				}
-
-				if ( !original.Contains( oldText ) )
-					return new { error = "old_text not found in file — no changes made", path };
-
-				var patched = original.Replace( oldText, newText );
-				System.IO.File.WriteAllText( absPath, patched );
-
-				// Trigger compile
-				object buildResult;
-				try
-				{
-					var psi = new System.Diagnostics.ProcessStartInfo
-					{
-						FileName        = "dotnet",
-						Arguments       = $"build \"{FileSystem.Mounted.GetFullPath( "." )}\" --no-restore -v quiet 2>&1",
-						RedirectStandardOutput = true,
-						RedirectStandardError  = true,
-						UseShellExecute = false,
-						CreateNoWindow  = true
-					};
-					using var proc = System.Diagnostics.Process.Start( psi );
-					var stdout = await proc.StandardOutput.ReadToEndAsync();
-					var stderr = await proc.StandardError.ReadToEndAsync();
-					await proc.WaitForExitAsync();
-					buildResult = new { exitCode = proc.ExitCode, output = (stdout + stderr).Trim() };
-				}
-				catch ( Exception be ) { buildResult = new { error = be.Message }; }
-
-				return new { success = true, path, replacements = (original.Length - patched.Length + newText.Length - oldText.Length) != 0 ? 1 : 0, build = buildResult };
-			}
-			catch ( Exception e ) { return (object)new { error = e.Message }; }
-		}, new { type = "object", properties = new { path = new { type = "string", description = "Relative .cs path" }, old_text = new { type = "string", description = "Exact text to replace" }, new_text = new { type = "string", description = "Replacement text" } }, required = new[] { "path", "old_text", "new_text" } }, annotations: new { destructiveHint = true } );
-
-		// ════════════════════════════════════════════════════════════════════
-		// KATEGORİ 3 — Akıllı Araçlar
-		// ════════════════════════════════════════════════════════════════════
-
-		RegisterToolAsync( "sbox_auto_fix_errors", "Compile the project and return structured error list with suggested fixes for each error.", async _ =>
-		{
-			try
-			{
-				var psi = new System.Diagnostics.ProcessStartInfo
-				{
-					FileName               = "dotnet",
-					Arguments              = $"build \"{FileSystem.Mounted.GetFullPath( "." )}\" --no-restore -v quiet 2>&1",
-					RedirectStandardOutput = true,
-					RedirectStandardError  = true,
-					UseShellExecute        = false,
-					CreateNoWindow         = true
-				};
-				using var proc = System.Diagnostics.Process.Start( psi );
-				var raw = await proc.StandardOutput.ReadToEndAsync() + await proc.StandardError.ReadToEndAsync();
-				await proc.WaitForExitAsync();
-
-				// Parse lines like: File.cs(10,3): error CS0246: ...
-				var errorRx = new System.Text.RegularExpressions.Regex( @"([^(]+)\((\d+),(\d+)\):\s+(error|warning)\s+(\w+):\s+(.+)" );
-				var errors  = new List<object>();
-				foreach ( var line in raw.Split( '\n' ) )
-				{
-					var m = errorRx.Match( line.Trim() );
-					if ( !m.Success ) continue;
-					var code = m.Groups[5].Value;
-					var msg  = m.Groups[6].Value.Trim();
-					errors.Add( new
-					{
-						file     = System.IO.Path.GetFileName( m.Groups[1].Value.Trim() ),
-						fullPath = m.Groups[1].Value.Trim(),
-						line     = int.Parse( m.Groups[2].Value ),
-						col      = int.Parse( m.Groups[3].Value ),
-						severity = m.Groups[4].Value,
-						code,
-						message  = msg,
-						hint     = code switch
-						{
-							"CS0618" => "Use the newer API suggested in the message (e.g. WorldPosition instead of Transform.Position)",
-							"CS0169" => "Field is declared but never used — remove it or add usage",
-							"CS0246" => "Type not found — check using directives or namespace",
-							"CS1061" => "Method/property does not exist — check API or spelling",
-							"SB1000" => "s&box whitelist violation — use TypeLibrary or GameTask instead of standard .NET API",
-							_        => "Review the message and fix accordingly"
-						}
-					} );
-				}
-
-				var success = proc.ExitCode == 0;
-				return (object)new { success, errorCount = errors.Count, errors };
-			}
-			catch ( Exception e ) { return (object)new { error = e.Message }; }
-		} );
-
-		RegisterTool( "sbox_describe_scene", "Return a natural language summary of the active scene suitable for LLM context.", _ =>
-		{
-			var scene = Game.ActiveScene;
-			if ( scene == null ) return new { description = "No active scene is loaded." };
-
-			var allObjects = scene.GetAllObjects( true ).Where( g => g.IsValid() ).ToList();
-			var byComponent = new Dictionary<string, int>();
-			foreach ( var go in allObjects )
-				foreach ( var c in go.Components.GetAll<Component>() )
-				{
-					var t = c.GetType().Name;
-					byComponent[t] = byComponent.TryGetValue( t, out var n ) ? n + 1 : 1;
-				}
-
-			// Game state
-			var gm   = scene.GetAllComponents<BlackFridayGameManager>().FirstOrDefault();
-			var qm   = scene.GetAllComponents<QuotaManager>().FirstOrDefault();
-			var alarm = scene.GetAllComponents<AlarmSystem>().FirstOrDefault();
-
-			var parts = new List<string>
-			{
-				$"The active scene contains {allObjects.Count} GameObjects.",
-				byComponent.Count > 0 ? "Component breakdown: " + string.Join( ", ", byComponent.OrderByDescending( p => p.Value ).Take( 10 ).Select( p => $"{p.Key}×{p.Value}" ) ) + "." : "",
-			};
-
-			if ( gm != null )
-				parts.Add( $"Game state: Day {gm.CurrentDay}, phase '{gm.CurrentPhase}', {gm.PhaseTimeRemaining:F0}s remaining in phase." );
-			if ( qm != null )
-				parts.Add( $"Economy: personal cash ${qm.MyPersonalCash:F0} / quota ${qm.PersonalQuota:F0}. Shared pool ${qm.SharedPoolCurrent:F0} / ${qm.SharedPoolTarget:F0}." );
-			if ( alarm != null )
-				parts.Add( $"Alarm: level {alarm.CurrentAlarmLevel} ({alarm.GetAlarmLevelName()}), progress {alarm.AlarmProgress:F0}%." );
-
-			return new { description = string.Join( " ", parts.Where( p => !string.IsNullOrEmpty( p ) ) ), objectCount = allObjects.Count, componentTypes = byComponent };
-		} );
-
-		// ════════════════════════════════════════════════════════════════════
-		// KATEGORİ 4 — Gerçek Zamanlı Property İzleme
-		// ════════════════════════════════════════════════════════════════════
-
-		RegisterTool( "sbox_watch_property", "Start watching a component property. When its value changes, all connected sessions receive a notification.", args =>
-		{
-			var goId   = args.GetProperty( "id" ).GetString();
-			var comp   = args.GetProperty( "component" ).GetString();
-			var prop   = args.GetProperty( "property" ).GetString();
-			var watchId = $"{goId}::{comp}::{prop}";
-			_watchedProperties[watchId] = (new WatchEntry( goId, comp, prop ), "");
-			return new { success = true, watchId, message = $"Now watching {comp}.{prop} on {goId}" };
-		}, new { type = "object", properties = new { id = new { type = "string", description = "GameObject GUID" }, component = new { type = "string", description = "Component type name" }, property = new { type = "string", description = "Property name" } }, required = new[] { "id", "component", "property" } } );
-
-		RegisterTool( "sbox_unwatch_property", "Stop watching a previously watched property.", args =>
-		{
-			var watchId = args.GetProperty( "watchId" ).GetString();
-			var removed = _watchedProperties.TryRemove( watchId, out _ );
-			return new { success = removed, watchId };
-		}, new { type = "object", properties = new { watchId = new { type = "string", description = "The watchId returned by sbox_watch_property" } }, required = new[] { "watchId" } } );
-
-		RegisterTool( "sbox_list_watches", "List all currently active property watches.", _ =>
-		{
-			var list = _watchedProperties.Select( kv => new
-			{
-				watchId   = kv.Key,
-				gameObjectId = kv.Value.Watch.GameObjectId,
-				component = kv.Value.Watch.ComponentType,
-				property  = kv.Value.Watch.PropertyName,
-				lastValue = kv.Value.LastValue
-			} ).ToList();
-			return new { count = list.Count, watches = list };
-		} );
+		McpBaseTools.Register();
+		McpSceneTools.Register();
+		McpCodeTools.Register();
 	}
 
 	// ── Property watch polling (called from state poll loop) ──────────────
@@ -2573,7 +1313,7 @@ public sealed class {className} : Component
 		};
 	}
 
-	private static object GetDynamicComponent( string typeName )
+	internal static object GetDynamicComponent( string typeName )
 	{
 		var scene = Game.ActiveScene;
 		if ( scene == null ) return null;
@@ -2592,7 +1332,7 @@ public sealed class {className} : Component
 		return null;
 	}
 
-	private static T GetPropValue<T>( object obj, string propName, T defaultValue = default )
+	internal static T GetPropValue<T>( object obj, string propName, T defaultValue = default )
 	{
 		if ( obj == null ) return defaultValue;
 		var prop = obj.GetType().GetProperty( propName );
@@ -2615,7 +1355,7 @@ public sealed class {className} : Component
 		return defaultValue;
 	}
 
-	private static double InvokeDoubleMethod( object obj, string methodName, double defaultValue = 0.0 )
+	internal static double InvokeDoubleMethod( object obj, string methodName, double defaultValue = 0.0 )
 	{
 		if ( obj == null ) return defaultValue;
 		var method = obj.GetType().GetMethod( methodName, Array.Empty<Type>() );
@@ -2634,7 +1374,7 @@ public sealed class {className} : Component
 		return defaultValue;
 	}
 
-	private static string InvokeStringMethod( object obj, string methodName, string defaultValue = "" )
+	internal static string InvokeStringMethod( object obj, string methodName, string defaultValue = "" )
 	{
 		if ( obj == null ) return defaultValue;
 		var method = obj.GetType().GetMethod( methodName, Array.Empty<Type>() );
@@ -2649,7 +1389,7 @@ public sealed class {className} : Component
 		return defaultValue;
 	}
 
-	private static List<string> ListAssetsByExt( params string[] exts )
+	internal static List<string> ListAssetsByExt( params string[] exts )
 	{
 		var files = new List<string>();
 		foreach ( var ext in exts )
@@ -2901,7 +1641,7 @@ public sealed class {className} : Component
 		}
 	}
 
-	private static object BuildSceneNode( GameObject go )
+	internal static object BuildSceneNode( GameObject go )
 	{
 		var components = new List<string>();
 		foreach ( var c in go.Components.GetAll<Component>() )
@@ -2928,7 +1668,7 @@ public sealed class {className} : Component
 		};
 	}
 
-	private static object ParseBuildMessage( string line, string type )
+	internal static object ParseBuildMessage( string line, string type )
 	{
 		try
 		{
