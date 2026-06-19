@@ -8,7 +8,7 @@ namespace McpBridge.Tools;
 [McpToolGroup("UI")]
 public class UITools
 {
-	[McpTool("sbox_ui_world_panel", "Creates a WorldPanel on a GameObject. Renders a Razor UI in 3D space.")]
+	[McpTool("sbox_ui_world_panel", "Creates a WorldPanel on a GameObject. Renders a Razor UI in 3D space.", OptionalParams = new[]{"guidStr", "name", "width", "height", "razorPath"})]
 	public object CreateWorldPanel( string guidStr = null, string name = "UI Panel", float width = 512, float height = 512, string razorPath = null )
 	{
 		var scene = Game.ActiveScene;
@@ -53,7 +53,7 @@ public class UITools
 		}
 	}
 
-	[McpTool("sbox_ui_text_display", "Creates a TextDisplay on a GameObject. Shows text in 3D space.")]
+	[McpTool("sbox_ui_text_display", "Creates a TextDisplay on a GameObject. Shows text in 3D space.", OptionalParams = new[]{"guidStr", "name", "text", "color", "size"})]
 	public object CreateTextDisplay( string guidStr = null, string name = "Text Display", string text = "Hello World", string color = "#ffffff", float size = 24 )
 	{
 		var scene = Game.ActiveScene;

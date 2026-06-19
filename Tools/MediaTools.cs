@@ -9,7 +9,7 @@ namespace McpBridge.Tools;
 [McpToolGroup("Media")]
 public class MediaTools
 {
-	[McpTool("sbox_play_sound", "Plays a sound at a position or on a GameObject.")]
+	[McpTool("sbox_play_sound", "Plays a sound at a position or on a GameObject.", OptionalParams = new[]{"x", "y", "z"})]
 	public object PlaySound( string soundEvent, float x = 0, float y = 0, float z = 0 )
 	{
 		try { Sound.Play( soundEvent, new Vector3( x, y, z ) ); return new { success = true, soundEvent, position = new { x, y, z } }; } catch ( Exception e ) { return new { error = e.Message }; }

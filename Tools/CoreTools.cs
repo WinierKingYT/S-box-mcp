@@ -25,7 +25,7 @@ public class CoreTools
 	public object RunCommand( string command )
 	{
 		try { ConsoleSystem.Run( command ); return new { success = true, command }; }
-		catch ( Exception e ) { return new { error = e.Message }; }
+		catch { return new { error = "Command failed" }; }
 	}
 
 	[McpTool("sbox_get_scene_hierarchy", "Returns scene hierarchy: all GameObjects with name, GUID, child count, component list.")]
@@ -65,7 +65,7 @@ public class CoreTools
 		return new { success = true, message = $"Destroyed {name}" };
 	}
 
-	[McpTool("sbox_set_transform", "Sets the transform of a GameObject with undo support.")]
+	[McpTool("sbox_set_transform", "Sets the transform of a GameObject with undo support.", OptionalParams = new[]{"position", "rotation", "scale"})]
 	public object SetTransform(
 		string guidStr,
 		string position = null,
@@ -88,7 +88,7 @@ public class CoreTools
 		return new { success = true, name = go.Name, position = go.WorldPosition, rotation = go.WorldRotation.Angles(), scale = go.LocalScale };
 	}
 
-	[McpTool("sbox_spawn_prefab", "Spawns a prefab at the given position with undo support.")]
+	[McpTool("sbox_spawn_prefab", "Spawns a prefab at the given position with undo support.", OptionalParams = new[]{"position"})]
 	public object SpawnPrefab( string prefabPath, string position = null )
 	{
 		var activeScene = Game.ActiveScene;
@@ -105,7 +105,7 @@ public class CoreTools
 		return new { success = true, guid = go.Id, name = go.Name };
 	}
 
-	[McpTool("sbox_list_assets", "Lists project assets by type.")]
+	[McpTool("sbox_list_assets", "Lists project assets by type.", OptionalParams = new[]{"assetType"})]
 	public object ListAssets( string assetType = "all" )
 	{
 		if ( !AssetExtensions.TryGetValue( assetType, out var exts ) ) return new { error = $"Unknown type '{assetType}'" };
@@ -175,13 +175,13 @@ public class CoreTools
 		comp.Enabled = val; return new { success = true, enabled = val };
 	}
 
-	[McpTool("sbox_list_components", "Lists all available component types.")]
+	[McpTool("sbox_list_components", "Lists all available component types.", OptionalParams = new[]{"filter"})]
 	public object ListComponents( string filter = null )
 	{
 		try { var types = TypeLibrary.GetTypes<Component>(); var result = types.Where( t => filter == null || t.Name.IndexOf( filter, StringComparison.OrdinalIgnoreCase ) >= 0 ).Select( t => new { name = t.Name, fullName = t.FullName, baseType = t.BaseType?.Name } ).OrderBy( t => t.name ).ToList(); return new { success = true, count = result.Count, components = result }; } catch ( Exception e ) { return new { error = e.Message }; }
 	}
 
-	[McpTool("sbox_duplicate_object", "Duplicates a GameObject.")]
+	[McpTool("sbox_duplicate_object", "Duplicates a GameObject.", OptionalParams = new[]{"newName", "offsetX", "offsetY", "offsetZ"})]
 	public object DuplicateObject( string guidStr, string newName = null, float offsetX = 0f, float offsetY = 0f, float offsetZ = 0f )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
@@ -356,16 +356,18 @@ public class CoreTools
 		var valid = new[] { "phase_change", "day_change", "alarm", "quota_due" };
 		if ( !valid.Contains( eventType ) )
 			return new { error = $"Invalid event type. Valid: {string.Join( ", ", valid )}" };
+		McpToolBridge.SubscribeEvent( eventType );
 		return new { success = true, eventType, subscribed = true };
 	}
 
 	[McpTool("sbox_unsubscribe_event", "Unsubscribe from a game event.")]
 	public object UnsubscribeEvent( string eventType )
 	{
+		McpToolBridge.UnsubscribeEvent( eventType );
 		return new { success = true, eventType, unsubscribed = true };
 	}
 
-	[McpTool("sbox_search_assets", "Search for assets by type (prefab, model, material, sound, texture, animation) and name query.")]
+	[McpTool("sbox_search_assets", "Search for assets by type (prefab, model, material, sound, texture, animation) and name query.", OptionalParams = new[]{"type", "query", "maxResults"})]
 	public object SearchAssets( string type = "all", string query = "", int maxResults = 20 )
 	{
 		if ( !AssetExtensions.TryGetValue( type, out var exts ) )
@@ -395,13 +397,19 @@ public class CoreTools
 		return new { events = new[] { "phase_change", "day_change", "alarm", "quota_due" } };
 	}
 
-	[McpTool("sbox_dry_run", "Validate a tool call without executing it. Checks if tool exists and parses arguments.")]
+	[McpTool("sbox_dry_run", "Validate a tool call without executing it. Checks if tool exists and parses arguments.", OptionalParams = new[]{"paramsJson"})]
 	public object DryRun( string tool, string paramsJson = "{}" )
 	{
-		var result = McpToolDispatcher.Instance.Registry.TryGet( tool, out var mdesc, out _ );
-		if ( !result )
+		var isGameTool = McpToolDispatcher.Instance.Registry.TryGet( tool, out var mdesc, out _ );
+		if ( !isGameTool && McpToolBridge.GlobalToolExists( tool ) )
+			return new { valid = true, tool = tool, note = "Editor tool (parameter validation not available on game side)" };
+
+		if ( !isGameTool )
 			return new { valid = false, error = $"Tool '{tool}' not found" };
 
+		var attr = mdesc.GetCustomAttribute<McpToolAttribute>();
+		var optional = attr?.OptionalParams ?? System.Array.Empty<string>();
+		var optionalSet = new System.Collections.Generic.HashSet<string>( optional );
 		var paramInfo = new List<object>();
 		var errorList = new List<string>();
 		using var doc = JsonDocument.Parse( paramsJson ?? "{}" );
@@ -411,7 +419,7 @@ public class CoreTools
 		{
 			var hasValue = root.TryGetProperty( p.Name, out var val );
 			paramInfo.Add( new { name = p.Name, type = p.ParameterType.Name, provided = hasValue, value = hasValue ? val.GetRawText() : null } );
-			if ( !hasValue )
+			if ( !hasValue && !optionalSet.Contains( p.Name ) )
 				errorList.Add( $"Missing required parameter: '{p.Name}' ({p.ParameterType.Name})" );
 		}
 
@@ -420,12 +428,16 @@ public class CoreTools
 		return new { valid = errorList.Count == 0, tool = tool, paramCount = pc, parameters = paramInfo, errors = errArr };
 	}
 
-	[McpTool("sbox_read_logs", "Returns recent log entries. Call enable=true once to start capturing.")]
+	[McpTool("sbox_read_logs", "Returns recent MCP tool log entries. Capture is manual — engine logs are not available (s&box Log has no hook API).", OptionalParams = new[]{"count", "enable"})]
 	public object ReadLogs( int count = 50, bool enable = false )
 	{
-		if ( enable ) McpLogBridge.Enable();
+		if ( enable )
+		{
+			McpLogBridge.Enable();
+			McpLogBridge.CaptureLog( "info", "Log capture enabled" );
+		}
 		var logs = McpLogBridge.GetRecent( count );
-		return new { enabled = McpLogBridge.IsEnabled, count = logs.Count, logs = logs.Select( e => new { e.Level, e.Message, time = e.Time.ToString( "HH:mm:ss" ) } ).ToList() };
+		return new { enabled = McpLogBridge.IsEnabled, count = logs.Count, logs = logs.Select( e => new { e.Level, e.Message, time = e.Time.ToString( "HH:mm:ss" ) } ).ToList(), note = "Only MCP tool events captured. Engine logs not available (s&box API limitation)." };
 	}
 
 	[McpTool("sbox_export_scene", "Export entire scene hierarchy as JSON. Includes transforms, components, and children.")]

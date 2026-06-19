@@ -31,7 +31,7 @@ public class GameTools
 		return new { guid = go.Id, name = go.Name, position = go.WorldPosition, rotation = go.WorldRotation, scale = go.WorldScale, parent = go.Parent?.Name, children = go.Children.Select( c => c.Name ).ToList() };
 	}
 
-	[McpTool("sbox_spawn_cart", "Spawns a new GameObject at a position.")]
+	[McpTool("sbox_spawn_cart", "Spawns a new GameObject at a position.", OptionalParams = new[]{"name"})]
 	public object SpawnCart( float x, float y, float z, string name = "MCP_Cart" )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
@@ -90,7 +90,7 @@ public class GameTools
 		return new { success = true, name = macro.Name, description = macro.Description, steps = macro.Steps };
 	}
 
-	[McpTool("sbox_save_macro", "Saves a macro (list of tool steps).")]
+	[McpTool("sbox_save_macro", "Saves a macro (list of tool steps).", OptionalParams = new[]{"description"})]
 	public object SaveMacro( string name, string description = "" )
 	{
 		var steps = new List<MacroStep>();

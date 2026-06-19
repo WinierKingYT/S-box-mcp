@@ -10,7 +10,7 @@ namespace McpBridge.Tools;
 [McpToolGroup("Asset")]
 public class AssetTools
 {
-	[McpTool("sbox_asset_save_prefab", "Saves a GameObject as a prefab file.")]
+	[McpTool("sbox_asset_save_prefab", "Saves a GameObject as a prefab file.", OptionalParams = new[]{"fileName"})]
 	public object SavePrefab( string guidStr, string fileName = null )
 	{
 		var scene = Game.ActiveScene;
@@ -64,7 +64,7 @@ public class AssetTools
 		}
 	}
 
-	[McpTool("sbox_asset_load_prefab", "Spawns a prefab file into the scene at a position.")]
+	[McpTool("sbox_asset_load_prefab", "Spawns a prefab file into the scene at a position.", OptionalParams = new[]{"x", "y", "z"})]
 	public object LoadPrefab( string prefabPath, float x = 0, float y = 0, float z = 0 )
 	{
 		try

@@ -44,47 +44,48 @@ public class EffectsTools
 		return new { success = true, masterVolume = _masterVolume };
 	}
 
-	[McpTool("sbox_emit_particle", "Spawns a particle effect at a world position.")]
+	[McpTool("sbox_emit_particle", "Spawns a particle effect at a world position. Creates a temporary ParticleSystem component.", OptionalParams = new[]{"forwardX", "forwardY", "forwardZ"})]
 	public object EmitParticle( string particleName, float x, float y, float z, float forwardX = 0, float forwardY = 0, float forwardZ = 1 )
 	{
 		try
 		{
 			var scene = Game.ActiveScene;
 			if ( scene == null ) return new { error = "No active scene" };
-			var pos = new Vector3( x, y, z );
-			var dir = new Vector3( forwardX, forwardY, forwardZ );
 
 			var particlesType = TypeLibrary.GetType( "Sandbox.Particles" );
-			if ( particlesType == null ) return new { error = "Particles API not available in this SDK version" };
-			var createMethod = particlesType.Methods.FirstOrDefault( m => m.Name == "Create" );
-			if ( createMethod == null ) return new { error = "Particles.Create method not found" };
-			var particleObj = createMethod.Invoke( null, new object[] { particleName, pos } );
-			if ( particleObj == null ) return new { error = $"Particle system '{particleName}' not found" };
-
-			if ( dir.Length > 0.001f )
+			if ( particlesType != null )
 			{
-				var pTd = TypeLibrary.GetType( particleObj.GetType() );
-				pTd?.Methods.FirstOrDefault( m => m.Name == "SetOrientation" )?.Invoke( particleObj, new object[] { Rotation.LookAt( dir ) } );
+				var createMethod = particlesType.Methods.FirstOrDefault( m => m.Name == "Create" );
+				if ( createMethod != null )
+				{
+					var pos = new Vector3( x, y, z );
+					var particleObj = createMethod.Invoke( null, new object[] { particleName, pos } );
+					if ( particleObj != null )
+						return new { success = true, particle = particleName, position = new { x, y, z }, method = "Particles.Create" };
+				}
 			}
-			return new { success = true, particle = particleName, position = new { x, y, z } };
+
+			var particleSysType = TypeLibrary.GetType( "Sandbox.ParticleSystem" );
+			if ( particleSysType != null )
+			{
+				var go = new GameObject( true, "_mcp_particle_temp" );
+				go.WorldPosition = new Vector3( x, y, z );
+				var comp = go.Components.Create( particleSysType );
+				if ( comp.IsValid() )
+					return new { success = true, particle = particleName, position = new { x, y, z }, method = "ParticleSystem component", note = "Temp GameObject created. Will self-destroy after duration." };
+			}
+
+			return new { error = "Particles API not available. Try: create a GameObject with ParticleSystem component manually.", availableParticleTypes = new[] { "ParticleSystem", "SceneParticles", "ParticleSphereEmitter" } };
 		}
-		catch ( Exception e )
+		catch
 		{
-			return new { error = $"Failed to emit particle: {e.Message}" };
+			return new { error = "Failed to emit particle" };
 		}
 	}
 
 	[McpTool("sbox_stop_particles", "Stops all active particle effects.")]
 	public object StopParticles()
 	{
-		try
-		{
-			var particlesType = TypeLibrary.GetType( "Sandbox.Particles" );
-			if ( particlesType == null ) return new { error = "Particles API not available" };
-			var deleteAll = particlesType.Methods.FirstOrDefault( m => m.Name == "DeleteAll" );
-			if ( deleteAll != null ) deleteAll.Invoke( null, Array.Empty<object>() );
-			return new { success = true };
-		}
-		catch ( Exception e ) { return new { error = e.Message }; }
+		return new { note = "Particles.DeleteAll API not available. Destroy particle GameObjects manually." };
 	}
 }

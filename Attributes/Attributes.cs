@@ -7,6 +7,7 @@ public sealed class McpToolAttribute( string name, string description ) : Attrib
 {
 	public string Name { get; } = name;
 	public string Description { get; } = description;
+	public string[] OptionalParams { get; init; } = System.Array.Empty<string>();
 }
 
 [AttributeUsage( AttributeTargets.Class )]

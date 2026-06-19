@@ -59,6 +59,9 @@ public class SchemaGenerator
 
 	public static object Generate( MethodDescription method )
 	{
+		var attr = method.GetCustomAttribute<McpToolAttribute>();
+		var optional = attr?.OptionalParams ?? System.Array.Empty<string>();
+		var optionalSet = new System.Collections.Generic.HashSet<string>( optional );
 		var props = new Dictionary<string, object>();
 		var required = new List<string>();
 		foreach ( var p in method.Parameters )
@@ -74,7 +77,8 @@ public class SchemaGenerator
 				{ "type", typeStr },
 				{ "description", DescribeParam( p.Name ) }
 			};
-			required.Add( p.Name );
+			if ( !optionalSet.Contains( p.Name ) )
+				required.Add( p.Name );
 		}
 		return new { type = "object", properties = props, required = required.ToArray() };
 	}

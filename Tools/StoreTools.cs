@@ -59,7 +59,7 @@ public class StoreTools
 		return new { level = alarm.GetAlarmLevelName(), levelIndex = alarm.CurrentAlarmLevel, progress = alarm.AlarmProgress, detectionRange = alarm.DetectionRange };
 	}
 
-	[McpTool("sbox_trigger_alarm", "Trigger the security alarm")]
+	[McpTool("sbox_trigger_alarm", "Trigger the security alarm", OptionalParams = new[]{"amount", "x", "y", "z"})]
 	public object TriggerAlarm( float amount = 10f, float x = 0f, float y = 0f, float z = 0f )
 	{
 		var scene = Game.ActiveScene;
@@ -180,7 +180,7 @@ public class StoreTools
 [McpToolGroup("Mechanics")]
 public class MechanicsTools
 {
-	[McpTool("sbox_spawn_customer", "Spawns a DummyBot customer at a position")]
+	[McpTool("sbox_spawn_customer", "Spawns a DummyBot customer at a position", OptionalParams = new[]{"x", "y", "z", "speed", "collectRange"})]
 	public object SpawnCustomer( float x = 0f, float y = 0f, float z = 0f, float speed = 200f, float collectRange = 80f )
 	{
 		var scene = Game.ActiveScene;
@@ -194,7 +194,7 @@ public class MechanicsTools
 		return new { success = true, guid = go.Id, name = go.Name, position = new { x, y, z } };
 	}
 
-	[McpTool("sbox_set_item_price", "Override prices for all items matching a value range")]
+	[McpTool("sbox_set_item_price", "Override prices for all items matching a value range", OptionalParams = new[]{"minValue", "maxValue", "newValue"})]
 	public object SetItemPrice( float minValue = 0f, float maxValue = 999f, float newValue = 10f )
 	{
 		var scene = Game.ActiveScene;

@@ -22,9 +22,9 @@ public class ToolRegistry
 			RegisterAll();
 			_initialized = true;
 		}
-		catch ( Exception e )
+		catch
 		{
-			Log.Error( $"[MCP] Tool Registration Failed: {e.Message}" );
+			Log.Error( "[MCP] Tool Registration Failed" );
 		}
 	}
 
@@ -53,12 +53,13 @@ public class ToolRegistry
 						_toolGroups[attr.Name] = groupName;
 						if ( inst != null )
 							_instances[m.Name] = inst;
+						McpToolBridge.RegisterGlobalToolName( attr.Name );
 					}
 				}
 			}
-			catch ( Exception ex )
+			catch
 			{
-				Log.Warning( $"[MCP] Failed to register tool group {entry.Type.Name}: {ex.Message}" );
+				Log.Warning( $"[MCP] Failed to register tool group {entry.Type.Name}" );
 			}
 		}
 		Log.Info( $"[MCP] Registered {_tools.Count} tools" );
@@ -97,9 +98,9 @@ public class ToolRegistry
 			var instance = _instances.GetValueOrDefault( mdesc.Name );
 			return mdesc.Invoke( instance, args.ToArray() );
 		}
-		catch ( Exception e )
+		catch
 		{
-			return new { error = e.InnerException?.Message ?? e.Message };
+			return new { error = "Tool execution failed" };
 		}
 	}
 

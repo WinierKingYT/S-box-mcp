@@ -11,7 +11,7 @@ namespace McpBridge.Tools;
 [McpToolGroup("Debug")]
 public class DebugTools
 {
-	[McpTool("sbox_debug_inspect", "Returns ALL properties and fields of a GameObject or Component by GUID and optional component index.")]
+	[McpTool("sbox_debug_inspect", "Returns ALL properties and fields of a GameObject or Component by GUID and optional component index.", OptionalParams = new[]{"componentIndex"})]
 	public object DebugInspect( string guidStr, int componentIndex = -1 )
 	{
 		var scene = Game.ActiveScene;
@@ -76,26 +76,13 @@ public class DebugTools
 		return new { type = comp.GetType().Name, enabled = comp.Enabled, properties = props };
 	}
 
-	[McpTool("sbox_debug_stack", "Returns current call stack info. Uses managed Environment.StackTrace.")]
+	[McpTool("sbox_debug_stack", "Returns current call stack info.")]
 	public object DebugStack()
 	{
-		try
-		{
-			var envType = TypeLibrary.GetType( "System.Environment" );
-			if ( envType == null ) return new { error = "Environment API not available" };
-			var stProp = envType.Properties.FirstOrDefault( p => p.Name == "StackTrace" && p.CanRead );
-			if ( stProp == null ) return new { error = "Environment.StackTrace not available" };
-			var trace = stProp.GetValue( null )?.ToString() ?? "";
-			var lines = trace.Split( new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries ).Take( 30 ).ToList();
-			return new { frameCount = lines.Count, frames = lines };
-		}
-		catch ( Exception e )
-		{
-			return new { error = $"Stack trace blocked: {e.Message}" };
-		}
+		return new { available = false, note = "Stack trace not available on game thread (s&box sandbox restriction)" };
 	}
 
-	[McpTool("sbox_debug_watch", "Watch a GameObject by GUID for N seconds. Uses GameTask.Delay to avoid blocking.")]
+	[McpTool("sbox_debug_watch", "Watch a GameObject by GUID for N seconds. Uses GameTask.Delay to avoid blocking.", OptionalParams = new[]{"durationSeconds", "intervalMs"})]
 	public async Task<object> DebugWatch( string guidStr, int durationSeconds = 5, int intervalMs = 1000 )
 	{
 		var scene = Game.ActiveScene;
@@ -115,7 +102,7 @@ public class DebugTools
 		return new { guid = guidStr, name = go.IsValid() ? go.Name : "destroyed", snapshots };
 	}
 
-	[McpTool("sbox_debug_list_components", "Lists all component types available in the game.")]
+	[McpTool("sbox_debug_list_components", "Lists all component types available in the game.", OptionalParams = new[]{"query"})]
 	public object DebugListComponents( string query = "" )
 	{
 		var types = TypeLibrary.GetTypes<Component>();
@@ -171,7 +158,7 @@ public class DebugTools
 		};
 	}
 
-	[McpTool("sbox_debug_search_types", "Search for registered types by name pattern. Useful for finding correct API types.")]
+	[McpTool("sbox_debug_search_types", "Search for registered types by name pattern. Useful for finding correct API types.", OptionalParams = new[]{"query", "category"})]
 	public object DebugSearchTypes( string query = "", string category = "" )
 	{
 		if ( string.IsNullOrEmpty( query ) && string.IsNullOrEmpty( category ) )

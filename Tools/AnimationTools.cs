@@ -10,7 +10,7 @@ namespace McpBridge.Tools;
 [McpToolGroup("Animation")]
 public class AnimationTools
 {
-	[McpTool("sbox_anim_set_param", "Sets an AnimGraph parameter on a ModelRenderer. Supports float, bool, int, and trigger.")]
+	[McpTool("sbox_anim_set_param", "Sets an AnimGraph parameter on a ModelRenderer. Supports float, bool, int, and trigger.", OptionalParams = new[]{"paramType"})]
 	public object SetAnimParam( string guidStr, string paramName, string value, string paramType = "float" )
 	{
 		var scene = Game.ActiveScene;
@@ -43,13 +43,13 @@ public class AnimationTools
 			setMethod.Invoke( renderer, new object[] { paramName, val } );
 			return new { success = true, name = go.Name, paramName, value, paramType };
 		}
-		catch ( Exception e )
+		catch
 		{
-			return new { error = $"Failed to set param: {e.Message}" };
+			return new { error = "Failed to set param" };
 		}
 	}
 
-	[McpTool("sbox_anim_get_params", "Gets all readable AnimGraph parameters from a ModelRenderer.")]
+	[McpTool("sbox_anim_get_params", "Gets all readable AnimGraph parameters from a ModelRenderer or SkinnedModelRenderer.")]
 	public object GetAnimParams( string guidStr )
 	{
 		var scene = Game.ActiveScene;
@@ -58,48 +58,85 @@ public class AnimationTools
 		var go = scene.Directory.FindByGuid( guid );
 		if ( !go.IsValid() ) return new { error = "GameObject not found" };
 		var renderer = go.Components.Get<ModelRenderer>();
-		if ( !renderer.IsValid() ) return new { error = "No ModelRenderer found" };
+		if ( !renderer.IsValid() )
+		{
+			var skinned = go.Components.Get<SkinnedModelRenderer>();
+			if ( !skinned.IsValid() ) return new { error = "No ModelRenderer or SkinnedModelRenderer found" };
+			renderer = (ModelRenderer)(Component)skinned;
+		}
 
 		try
 		{
-			var td = TypeLibrary.GetType( typeof( ModelRenderer ) );
-			var graphProp = td?.Properties.FirstOrDefault( p => p.Name == "AnimGraph" && p.CanRead );
-			if ( graphProp == null )
+			var td = TypeLibrary.GetType( renderer.GetType() );
+			var graphProp = td?.Properties.FirstOrDefault( p => (p.Name == "AnimGraph" || p.Name == "AnimationGraph") && p.CanRead );
+			if ( graphProp != null )
 			{
-				var props = td?.Properties.Where( p => p.CanRead ).Select( p => p.Name ).ToList();
-				return new { error = "AnimGraph property not found on ModelRenderer", availableProperties = props ?? new List<string>() };
-			}
-			var graph = graphProp.GetValue( renderer );
-			if ( graph == null ) return new { error = "No AnimGraph assigned" };
-
-			var graphTd = TypeLibrary.GetType( graph.GetType() );
-			var paramsProp = graphTd?.Properties.FirstOrDefault( p => p.Name == "Parameters" && p.CanRead );
-			if ( paramsProp == null ) return new { error = "Parameters property not found" };
-			var parameters = paramsProp.GetValue( graph ) as System.Collections.IEnumerable;
-			if ( parameters == null ) return new { error = "No parameters" };
-
-			var anims = new List<object>();
-			foreach ( var p in parameters )
-			{
-				try
+				var graph = graphProp.GetValue( renderer );
+				if ( graph != null )
 				{
-					var pTd = TypeLibrary.GetType( p.GetType() );
-					var name = pTd?.Properties.FirstOrDefault( x => x.Name == "Name" )?.GetValue( p )?.ToString() ?? "?";
-					var type = pTd?.Properties.FirstOrDefault( x => x.Name == "Type" )?.GetValue( p )?.ToString() ?? "?";
-					var value = pTd?.Properties.FirstOrDefault( x => x.Name == "Value" )?.GetValue( p )?.ToString() ?? "?";
-					anims.Add( new { name, type, value } );
+					var graphTd = TypeLibrary.GetType( graph.GetType() );
+					var paramsProp = graphTd?.Properties.FirstOrDefault( p => p.Name == "Parameters" && p.CanRead );
+					if ( paramsProp != null )
+					{
+						var parameters = paramsProp.GetValue( graph ) as System.Collections.IEnumerable;
+						if ( parameters != null )
+						{
+							var anims = new List<object>();
+							foreach ( var p in parameters )
+							{
+								try
+								{
+									var pTd = TypeLibrary.GetType( p.GetType() );
+									var name = pTd?.Properties.FirstOrDefault( x => x.Name == "Name" )?.GetValue( p )?.ToString() ?? "?";
+									var ptype = pTd?.Properties.FirstOrDefault( x => x.Name == "Type" )?.GetValue( p )?.ToString() ?? "?";
+									var value = pTd?.Properties.FirstOrDefault( x => x.Name == "Value" )?.GetValue( p )?.ToString() ?? "?";
+									anims.Add( new { name, type = ptype, value } );
+								}
+								catch { }
+							}
+							return new { success = true, name = go.Name, paramCount = anims.Count, parameters = anims };
+						}
+					}
 				}
-				catch { }
 			}
-			return new { success = true, name = go.Name, paramCount = anims.Count, parameters = anims };
+
+			var modelProp = td?.Properties.FirstOrDefault( p => p.Name == "Model" && p.CanRead );
+			var model = modelProp?.GetValue( renderer );
+			if ( model != null )
+			{
+				var modelTd = TypeLibrary.GetType( model.GetType() );
+				var seqsProp = modelTd?.Properties.FirstOrDefault( p => p.Name == "Sequences" && p.CanRead );
+				if ( seqsProp != null )
+				{
+					var seqs = seqsProp.GetValue( model ) as System.Collections.IEnumerable;
+					var seqList = new List<string>();
+					if ( seqs != null )
+					{
+						foreach ( var s in seqs )
+						{
+							try
+							{
+								var sTd = TypeLibrary.GetType( s.GetType() );
+								var sn = sTd?.Properties.FirstOrDefault( x => x.Name == "Name" )?.GetValue( s )?.ToString();
+								if ( sn != null ) seqList.Add( sn );
+							}
+							catch { }
+						}
+					}
+					return new { success = true, name = go.Name, note = "AnimGraph not exposed via TypeDescription. Model sequences available instead.", sequences = seqList };
+				}
+			}
+
+			var props = td?.Properties.Where( p => p.CanRead ).Select( p => p.Name ).ToList();
+			return new { error = "AnimGraph property not found", availableProperties = props ?? new List<string>() };
 		}
-		catch ( Exception e )
+		catch
 		{
-			return new { error = e.Message };
+			return new { error = "Failed to read animation params" };
 		}
 	}
 
-	[McpTool("sbox_anim_play_sequence", "Plays an animation sequence on a ModelRenderer by name.")]
+	[McpTool("sbox_anim_play_sequence", "Plays an animation sequence on a ModelRenderer by name.", OptionalParams = new[]{"loop"})]
 	public object PlaySequence( string guidStr, string sequenceName, bool loop = false )
 	{
 		var scene = Game.ActiveScene;

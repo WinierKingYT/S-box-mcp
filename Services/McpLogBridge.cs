@@ -13,14 +13,14 @@ public static class McpLogBridge
 	{
 		if ( IsEnabled ) return;
 		IsEnabled = true;
-		Log.Info( "[MCP] Log bridge enabled" );
+		Capture( "info", "[MCP] Log bridge enabled" );
 	}
 
 	public static void Disable()
 	{
 		if ( !IsEnabled ) return;
 		IsEnabled = false;
-		Log.Info( "[MCP] Log bridge disabled" );
+		Capture( "info", "[MCP] Log bridge disabled" );
 	}
 
 	public static void Forward( string level, string source, string message )
@@ -47,9 +47,12 @@ public static class McpLogBridge
 			if ( _logHistory.Count > MaxHistory )
 				_logHistory.RemoveAt( 0 );
 		}
+	}
 
-		if ( IsEnabled )
-			OnLogMessage?.Invoke( level, "engine", message );
+	public static void CaptureLog( string level, string message )
+	{
+		if ( !IsEnabled ) return;
+		Capture( level, message );
 	}
 
 	public static List<LogEntry> GetRecent( int count = 50 )

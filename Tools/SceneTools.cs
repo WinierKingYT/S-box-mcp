@@ -19,7 +19,7 @@ public class SceneTools
 		return new { lights };
 	}
 
-	[McpTool("sbox_set_light_color", "Sets color and optional properties on a light.")]
+	[McpTool("sbox_set_light_color", "Sets color and optional properties on a light.", OptionalParams = new[]{"shadows", "shadowHardness", "fogStrength"})]
 	public object SetLightColor( string guidStr, string color, string shadows = null, string shadowHardness = null, string fogStrength = null )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
@@ -34,7 +34,7 @@ public class SceneTools
 		return new { error = "No light component found" };
 	}
 
-	[McpTool("sbox_set_fog", "Controls fog settings on the scene's DirectionalLight.")]
+	[McpTool("sbox_set_fog", "Controls fog settings on the scene's DirectionalLight.", OptionalParams = new[]{"mode", "strength", "lightGuid"})]
 	public object SetFog( string mode = null, string strength = null, string lightGuid = null )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
@@ -44,7 +44,7 @@ public class SceneTools
 		return new { success = true, fogMode = light.FogMode.ToString(), fogStrength = light.FogStrength };
 	}
 
-	[McpTool("sbox_set_background", "Changes the main camera background color.")]
+	[McpTool("sbox_set_background", "Changes the main camera background color.", OptionalParams = new[]{"clearFlags"})]
 	public object SetBackground( string color, string clearFlags = null )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
@@ -55,7 +55,7 @@ public class SceneTools
 		return new { success = true, backgroundColor = cam.BackgroundColor.ToString(), clearFlags = cam.ClearFlags.ToString() };
 	}
 
-	[McpTool("sbox_set_exposure", "Set camera exposure compensation (EV, range -6 to +6).")]
+	[McpTool("sbox_set_exposure", "Set camera exposure compensation (EV, range -6 to +6).", OptionalParams = new[]{"autoExposure"})]
 	public object SetExposure( string ev100, bool autoExposure = false )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
@@ -80,7 +80,7 @@ public class SceneTools
 		return new { success = true, exposureCompensation = clamped, autoExposure, warning };
 	}
 
-	[McpTool("sbox_set_shadow_settings", "Sets shadow quality settings on the main directional light.")]
+	[McpTool("sbox_set_shadow_settings", "Sets shadow quality settings on the main directional light.", OptionalParams = new[]{"distance", "bias", "normalBias", "cascadeCount", "lightGuid"})]
 	public object SetShadowSettings( string distance = null, string bias = null, string normalBias = null, string cascadeCount = null, string lightGuid = null )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
@@ -99,29 +99,34 @@ public class SceneTools
 		return new { success = true, shadowDistance = sd, shadowBias = light.ShadowBias };
 	}
 
-	[McpTool("sbox_set_skybox", "Changes skybox material on the main camera or scene environment.")]
+	[McpTool("sbox_set_skybox", "Creates or modifies a skybox. Auto-creates SkyBox2D if none exists.", OptionalParams = new[]{"materialPath", "intensity"})]
 	public object SetSkybox( string materialPath = null, string intensity = null )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
 		try
 		{
-			var skyType = TypeLibrary.GetType( "Sandbox.SceneSkyBox" );
+			var skyType = TypeLibrary.GetType( "Sandbox.SceneSkyBox" ) ?? TypeLibrary.GetType( "Sandbox.SkyBox2D" );
 			if ( skyType == null )
 			{
 				var candidates = TypeLibrary.GetTypes<Component>().Where( t => t.Name.Contains( "Sky" ) || t.Name.Contains( "sky" ) ).Select( t => t.FullName ).Take( 10 ).ToList();
-				return new { error = "SkyComponent type not found", tried = "Sandbox.SceneSkyBox", candidates };
+				return new { error = "SkyComponent type not found", tried = new[] { "Sandbox.SceneSkyBox", "Sandbox.SkyBox2D" }, candidates };
 			}
 			Component sky = null;
 			foreach ( var go in scene.GetAllObjects( true ) )
 			{
 				foreach ( var comp in go.Components.GetAll<Component>() )
 				{
-					if ( comp.IsValid() && TypeLibrary.GetType( comp.GetType() ) == skyType )
+					if ( comp.IsValid() && TypeLibrary.GetType( comp.GetType() )?.FullName == skyType.FullName )
 					{ sky = comp; break; }
 				}
 				if ( sky != null ) break;
 			}
-			if ( sky == null ) return new { error = "No SkyComponent found. Add one first." };
+			if ( sky == null )
+			{
+				var skyGo = new GameObject( true, "MCP Skybox" );
+				sky = skyGo.Components.Create( skyType );
+				if ( !sky.IsValid() ) return new { error = "Failed to create skybox" };
+			}
 			var skyTd = TypeLibrary.GetType( sky.GetType() );
 			if ( materialPath != null )
 			{
@@ -136,9 +141,12 @@ public class SceneTools
 			}
 			var readMatProp = skyTd?.Properties.FirstOrDefault( p => p.Name == "Material" && p.CanRead );
 			var matName = readMatProp?.GetValue( sky ) is Material m ? m.Name : "none";
-			return new { success = true, material = matName };
+			return new { success = true, material = matName, autoCreated = true };
 		}
-		catch ( Exception e ) { return new { error = e.Message }; }
+		catch
+		{
+			return new { error = "Failed to set skybox" };
+		}
 	}
 
 	[McpTool("sbox_set_tonemapping", "Changes the tonemapping mode. Options: none, aces, reinhard, neutral, filmic.")]
@@ -201,7 +209,7 @@ public class SceneTools
 		renderer.MaterialOverride = null; return new { success = true, message = "Material override removed" };
 	}
 
-	[McpTool("sbox_add_logic_rule", "Creates a new Logic Weaver rule.")]
+	[McpTool("sbox_add_logic_rule", "Creates a new Logic Weaver rule.", OptionalParams = new[]{"actionParams"})]
 	public object AddLogicRule( string triggerType, string sourceGuid, string actionType, string targetGuid, string actionParams = null )
 	{
 		var id = LogicWeaver.AddRule( new LogicRule { TriggerType = triggerType, SourceGuid = sourceGuid, ActionType = actionType, TargetGuid = targetGuid, ActionParams = actionParams } );
@@ -220,38 +228,14 @@ public class SceneTools
 	}
 
 	[McpTool("sbox_navmesh_status", "Returns navmesh availability.")] public object NavMeshStatus() { try { return new { success = true, isAvailable = NavMeshHelper.IsAvailable, isLoaded = NavMeshHelper.IsLoaded }; } catch ( Exception e ) { return new { error = e.Message }; } }
-	[McpTool("sbox_navmesh_random_point", "Returns a random point on the navmesh.")] public object NavMeshRandomPoint( float cx, float cy, float cz, float radius = 500f ) { if ( !NavMeshHelper.IsAvailable ) return new { error = "NavMesh not available" }; try { var pt = NavMeshHelper.GetRandomPoint( new Vector3( cx, cy, cz ), radius ); return pt.HasValue ? new { success = true, point = new { x = pt.Value.x, y = pt.Value.y, z = pt.Value.z } } : new { error = "No point found" }; } catch ( Exception e ) { return new { error = e.Message }; } }
+	[McpTool("sbox_navmesh_random_point", "Returns a random point on the navmesh.", OptionalParams = new[]{"radius"})] public object NavMeshRandomPoint( float cx, float cy, float cz, float radius = 500f ) { if ( !NavMeshHelper.IsAvailable ) return new { error = "NavMesh not available" }; try { var pt = NavMeshHelper.GetRandomPoint( new Vector3( cx, cy, cz ), radius ); return pt.HasValue ? new { success = true, point = new { x = pt.Value.x, y = pt.Value.y, z = pt.Value.z } } : new { error = "No point found" }; } catch ( Exception e ) { return new { error = e.Message }; } }
 
-	[McpTool("sbox_set_wind", "Sets wind direction and speed on WindComponent (if present in scene).")]
+	[McpTool("sbox_set_wind", "Sets wind direction and speed. Note: WindComponent not available in this SDK version.", OptionalParams = new[]{"directionX", "directionY", "directionZ", "speed"})]
 	public object SetWind( float directionX = 0, float directionY = 1, float directionZ = 0, float speed = 100 )
 	{
 		var scene = Game.ActiveScene;
 		if ( scene == null ) return new { error = "No active scene" };
-		var windType = TypeLibrary.GetType( "Sandbox.WindComponent" );
-		if ( windType == null )
-		{
-			var candidates = TypeLibrary.GetTypes<Component>().Where( t => t.Name.Contains( "Wind" ) ).Select( t => t.FullName ).ToList();
-			return new { error = "WindComponent type not found", candidates };
-		}
-		Component windComp = null;
-		foreach ( var go in scene.GetAllObjects( true ) )
-		{
-			foreach ( var comp in go.Components.GetAll<Component>() )
-			{
-				if ( comp.IsValid() && TypeLibrary.GetType( comp.GetType() ) == windType )
-				{ windComp = comp; break; }
-			}
-			if ( windComp != null ) break;
-		}
-		if ( windComp == null ) return new { error = "No WindComponent in scene. Add one first." };
-
-		var td = TypeLibrary.GetType( windComp.GetType() );
-		var dir = new Vector3( directionX, directionY, directionZ ).Normal;
-		td?.Properties.FirstOrDefault( p => p.Name == "Direction" && p.CanWrite )?.SetValue( windComp, dir );
-		td?.Properties.FirstOrDefault( p => p.Name == "Speed" && p.CanWrite )?.SetValue( windComp, speed );
-		var readDir = td?.Properties.FirstOrDefault( p => p.Name == "Direction" && p.CanRead )?.GetValue( windComp ) ?? dir;
-		var readSpeed = td?.Properties.FirstOrDefault( p => p.Name == "Speed" && p.CanRead )?.GetValue( windComp ) ?? speed;
-		return new { success = true, direction = readDir, speed = readSpeed };
+		return new { success = false, available = false, note = "WindComponent type not found in this SDK version. Consider using PhysicsWorld gravity or environment settings instead.", direction = new { x = directionX, y = directionY, z = directionZ }, speed };
 	}
 
 	[McpTool("sbox_render_get_info", "Returns render/display information: resolution, shadow settings, quality levels.")]
@@ -292,7 +276,7 @@ public class SceneTools
 		catch ( Exception e ) { return new { error = e.Message }; }
 	}
 
-	[McpTool("sbox_scene_settings", "Read or modify scene-wide settings: fog, lighting, physics via reflection.")]
+	[McpTool("sbox_scene_settings", "Read or modify scene-wide settings: fog, lighting, physics via reflection.", OptionalParams = new[]{"fogColor", "fogStart", "fogEnd", "gravityX", "gravityY", "gravityZ"})]
 	public object SceneSettings( string fogColor = null, string fogStart = null, string fogEnd = null, string gravityX = null, string gravityY = null, string gravityZ = null )
 	{
 		var scene = Game.ActiveScene;

@@ -97,23 +97,28 @@ public class ToolRunner
 			var sw = Stopwatch.StartNew();
 			var res = mdesc.Invoke( instance, args.ToArray() );
 
-			if ( res is Task task )
+		if ( res is Task task )
+		{
+			const int toolTimeoutMs = 30000;
+			if ( !task.IsCompleted )
 			{
-				const int toolTimeoutMs = 30000;
-				const int pollMs = 100;
-				var elapsed = 0;
-				while ( !task.IsCompleted && elapsed < toolTimeoutMs )
-				{
-					await GameTask.Delay( pollMs );
-					elapsed += pollMs;
-				}
-				if ( !task.IsCompleted )
-				{
-					Interlocked.Increment( ref _totalCalls );
-					McpReplay.Record( toolName, json, "Timed out", sw.ElapsedMilliseconds, false );
-					return (id, id.ToError( -32002, $"Tool '{toolName}' timed out" ));
-				}
-				await task;
+				var timeoutTcs = new TaskCompletionSource<object>();
+				_ = DelayAndComplete( timeoutTcs, toolTimeoutMs );
+				await Task.WhenAny( task, timeoutTcs.Task );
+			}
+			if ( !task.IsCompleted )
+			{
+				Interlocked.Increment( ref _totalCalls );
+				McpReplay.Record( toolName, json, "Timed out", sw.ElapsedMilliseconds, false );
+				return (id, id.ToError( -32002, $"Tool '{toolName}' timed out" ));
+			}
+			await task;
+				var taskDesc = TypeLibrary.GetType( task.GetType() );
+				var resultProp = taskDesc?.Properties.FirstOrDefault( p => p.Name == "Result" && p.CanRead );
+				if ( resultProp != null )
+					res = resultProp.GetValue( task );
+				else
+					res = null;
 			}
 			Interlocked.Increment( ref _totalCalls );
 			var resText = JsonSerializer.Serialize( res, JsonRpcExtensions.SerializerOpts );
@@ -127,6 +132,19 @@ public class ToolRunner
 			Interlocked.Increment( ref _totalCalls );
 			McpReplay.Record( "unknown", json, ex.Message, 0, false );
 			return (id, id.ToError( -32603, ex.InnerException?.Message ?? ex.Message ));
+		}
+	}
+
+	private static async Task DelayAndComplete( TaskCompletionSource<object> tcs, int ms )
+	{
+		try
+		{
+			await GameTask.Delay( ms );
+			tcs.TrySetResult( null );
+		}
+		catch
+		{
+			tcs.TrySetResult( null );
 		}
 	}
 }

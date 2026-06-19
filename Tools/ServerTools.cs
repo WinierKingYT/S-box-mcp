@@ -9,7 +9,7 @@ namespace McpBridge.Tools;
 [McpToolGroup("Server")]
 public class ServerTools
 {
-	[McpTool("sbox_list_files", "Lists files in the game's data directory.")]
+	[McpTool("sbox_list_files", "Lists files in the game's data directory.", OptionalParams = new[]{"path"})]
 	public object ListFiles( string path = "" )
 	{
 		var dir = FileSystem.Data;
@@ -51,7 +51,7 @@ public class ServerTools
 		dir.DeleteFile( filePath ); return new { success = true, path = filePath };
 	}
 
-	[McpTool("sbox_list_logs", "Retrieves recent engine log entries.")]
+	[McpTool("sbox_list_logs", "Retrieves recent engine log entries.", OptionalParams = new[]{"count"})]
 	public object ListLogs( string count = "50" )
 	{
 		int.TryParse( count, out var max ); if ( max < 1 ) max = 50;

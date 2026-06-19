@@ -32,7 +32,7 @@ public class PhysicsTools
 
 	private class TimescaleData { public float scale { get; set; } }
 
-	[McpTool("sbox_set_gravity", "Sets the scene's global gravity vector.")]
+	[McpTool("sbox_set_gravity", "Sets the scene's global gravity vector.", OptionalParams = new[]{"x", "y", "z"})]
 	public object SetGravity( float x = 0f, float y = 0f, float z = -800f )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
@@ -43,12 +43,12 @@ public class PhysicsTools
 	[McpTool("sbox_get_gravity", "Returns the current global gravity vector.")]
 	public object GetGravity() { var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" }; return new { success = true, gravity = scene.PhysicsWorld.Gravity }; }
 
-	[McpTool("sbox_set_timescale", "Sets the global time scale (1.0 = normal speed).")]
+	[McpTool("sbox_set_timescale", "Sets the global time scale (1.0 = normal speed).", OptionalParams = new[]{"scale"})]
 	public object SetTimescale( float scale = 1f ) { var ts = Math.Max( 0.01f, scale ); SaveTimescale( ts ); try { ConsoleSystem.Run( "sv_timescale", ts ); } catch { } return new { success = true, timescale = ts }; }
 
 	[McpTool("sbox_get_timescale", "Returns the current global time scale.")] public object GetTimescale() => new { success = true, timescale = LoadTimescale() };
 
-	[McpTool("sbox_apply_impulse", "Applies a physics impulse to a GameObject's Rigidbody.")]
+	[McpTool("sbox_apply_impulse", "Applies a physics impulse to a GameObject's Rigidbody.", OptionalParams = new[]{"x", "y", "z"})]
 	public object ApplyImpulse( string guidStr, float x = 0f, float y = 0f, float z = 0f )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
@@ -82,14 +82,14 @@ public class PhysicsTools
 		try { var center = new Vector3( cx, cy, cz ); var radiusSq = radius * radius; var hits = new List<object>(); var seen = new HashSet<Guid>(); foreach ( var col in scene.GetAllComponents<Collider>() ) { if ( !col.IsValid() ) continue; var distSq = col.WorldPosition.DistanceSquared( center ); if ( distSq <= radiusSq && !seen.Contains( col.GameObject.Id ) ) { seen.Add( col.GameObject.Id ); hits.Add( new { name = col.GameObject.Name, guid = col.GameObject.Id, distance = MathF.Sqrt( distSq ) } ); } } return new { success = true, center, radius, count = hits.Count, hits }; } catch ( Exception e ) { return new { error = e.Message }; }
 	}
 
-	[McpTool("sbox_get_physics_bodies", "Lists all GameObjects with a Rigidbody.")]
+	[McpTool("sbox_get_physics_bodies", "Lists all GameObjects with a Rigidbody.", OptionalParams = new[]{"filter"})]
 	public object GetPhysicsBodies( string filter = null )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
 		try { var bodies = scene.GetAllComponents<Rigidbody>().Where( rb => rb.IsValid() ).Select( rb => new { gameObject = rb.GameObject.Name, guid = rb.GameObject.Id, mass = rb.Mass, speed = rb.Velocity.Length } ); if ( !string.IsNullOrEmpty( filter ) ) bodies = bodies.Where( b => b.gameObject.IndexOf( filter, StringComparison.OrdinalIgnoreCase ) >= 0 ); return new { success = true, count = bodies.Count(), bodies = bodies.ToList() }; } catch ( Exception e ) { return new { error = e.Message }; }
 	}
 
-	[McpTool("sbox_set_physics_material", "Sets physics damping/mass on a Rigidbody.")]
+	[McpTool("sbox_set_physics_material", "Sets physics damping/mass on a Rigidbody.", OptionalParams = new[]{"linearDamping", "angularDamping", "mass"})]
 	public object SetPhysicsMaterial( string guidStr, string linearDamping = null, string angularDamping = null, string mass = null )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
@@ -101,7 +101,7 @@ public class PhysicsTools
 		return new { success = true, linearDamping = rb.LinearDamping, angularDamping = rb.AngularDamping, mass = rb.Mass };
 	}
 
-	[McpTool("sbox_add_force", "Applies an impulse force to a Rigidbody.")]
+	[McpTool("sbox_add_force", "Applies an impulse force to a Rigidbody.", OptionalParams = new[]{"dx", "dy", "dz", "magnitude"})]
 	public object AddForce( string guidStr, float dx = 0f, float dy = 0f, float dz = 0f, float magnitude = 100f )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
@@ -112,7 +112,7 @@ public class PhysicsTools
 		rb.ApplyImpulse( dir.Normal * magnitude ); return new { success = true, force = dir.Normal * magnitude };
 	}
 
-	[McpTool("sbox_add_torque", "Applies angular impulse to a Rigidbody.")]
+	[McpTool("sbox_add_torque", "Applies angular impulse to a Rigidbody.", OptionalParams = new[]{"tx", "ty", "tz"})]
 	public object AddTorque( string guidStr, float tx = 0f, float ty = 0f, float tz = 0f )
 	{
 		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
