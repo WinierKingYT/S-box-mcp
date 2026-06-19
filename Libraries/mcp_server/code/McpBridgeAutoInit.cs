@@ -6,12 +6,19 @@ namespace McpBridge;
 
 public static class McpBridgeAutoInit
 {
-	private static int _started;
+	private static Task _runningCreateTask;
+	private static readonly object _lock = new();
 
 	public static void EnsureCreated()
 	{
-		if ( Interlocked.Exchange( ref _started, 1 ) != 0 ) return;
-		_ = CreateAsync();
+		lock ( _lock )
+		{
+			if ( McpBridgeComponent.Instance != null )
+				return;
+			if ( _runningCreateTask != null && !_runningCreateTask.IsCompleted )
+				return;
+			_runningCreateTask = CreateAsync();
+		}
 	}
 
 	[Event( "game.active" )]

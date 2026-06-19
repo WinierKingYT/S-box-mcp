@@ -29,7 +29,7 @@ public static class McpEditorServer
 	{
 		public CancellationTokenSource ToolCts { get; set; } = new();
 		public Task CurrentToolTask { get; set; }
-		public McpBridge.Middleware.SlidingWindowRateLimiter RateLimiter { get; } = new( 60 );
+		public McpBridge.Middleware.SlidingWindowRateLimiter RateLimiter { get; } = new( DefaultRateLimit );
 	}
 	internal static readonly ConcurrentDictionary<string, SseSession> _sessions = new();
 	internal record ToolDef( Func<JsonElement, Task<object>> Handler, string Description, string Group = "Editor", object InputSchema = null, object Annotations = null );
@@ -122,12 +122,50 @@ public static class McpEditorServer
 	{
 		try
 		{
-			if ( !FileSystem.Mounted.FileExists( path ) )
+			var absPath = path;
+			if ( !System.IO.Path.IsPathRooted( path ) )
+			{
+				absPath = System.IO.Path.Combine( FileSystem.Mounted.GetFullPath( "." ), path.Replace( "/", System.IO.Path.DirectorySeparatorChar.ToString() ) );
+			}
+
+			if ( !System.IO.File.Exists( absPath ) )
 				return $"// File not found: {path}";
-			var text = FileSystem.Mounted.ReadAllText( path );
+
+			var fileInfo = new System.IO.FileInfo( absPath );
+			var fileLen = fileInfo.Length;
+			var ext = fileInfo.Extension.ToLower();
+
+			var binaryExts = new HashSet<string>
+			{
+				".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".vtex", ".vmdl", ".vsnd", ".wav", ".mp3",
+				".dll", ".pdb", ".exe", ".fbx", ".obj", ".glb", ".gltf", ".zip", ".tar", ".gz", ".rar", ".7z"
+			};
+
+			if ( binaryExts.Contains( ext ) )
+			{
+				return $"// Binary File: {path}\n// Extension: {ext}\n// Size: {fileLen:N0} bytes\n\n[Binary content preview is not available]";
+			}
+
+			if ( fileLen > 2 * 1024 * 1024 )
+			{
+				var previewLines = new List<string>();
+				using ( var stream = System.IO.File.OpenRead( absPath ) )
+				using ( var reader = new System.IO.StreamReader( stream, Encoding.UTF8 ) )
+				{
+					string line;
+					while ( previewLines.Count < 100 && (line = reader.ReadLine()) != null )
+					{
+						previewLines.Add( line );
+					}
+				}
+				var preview = string.Join( "\n", previewLines );
+				return $"// Large File: {path} ({fileLen:N0} bytes - preview limited to first 100 lines)\n\n{preview}";
+			}
+
+			var text = System.IO.File.ReadAllText( absPath );
 			var lines = text.Split( '\n' );
-			var preview = string.Join( "\n", lines.Take( 100 ) );
-			return $"// File: {path}  ({lines.Length} lines, {text.Length} bytes)\n\n{preview}";
+			var textPreview = string.Join( "\n", lines.Take( 100 ) );
+			return $"// File: {path}  ({lines.Length} lines, {text.Length} bytes)\n\n{textPreview}";
 		}
 		catch ( Exception ex )
 		{
@@ -371,6 +409,7 @@ public static class McpEditorServer
 	private static async Task PollWatchedPropertiesAsync()
 	{
 		if ( _watchedProperties.IsEmpty ) return;
+		await GameTask.MainThread();
 		var scene = Game.ActiveScene;
 		if ( scene == null ) return;
 
@@ -469,6 +508,11 @@ public static class McpEditorServer
 			catch ( SocketException e ) when ( e.SocketErrorCode == SocketError.AccessDenied )
 			{
 				Log.Error( $"[MCP] Port {_port} access denied" );
+				return;
+			}
+			catch ( SocketException e ) when ( e.SocketErrorCode == SocketError.AddressAlreadyInUse )
+			{
+				Log.Error( $"[MCP] Port {_port} is already in use by another application or instance! Stop any other editors or MCP servers." );
 				return;
 			}
 			catch ( Exception e )
@@ -1582,6 +1626,9 @@ public static class McpEditorServer
 			{
 				await GameTask.Delay( 5000 );
 				if ( ct.IsCancellationRequested ) break;
+
+				// Poll watched properties
+				await PollWatchedPropertiesAsync();
 
 				// Check all subscribed resources for changes
 				foreach ( var uri in _subscriptions.Keys )

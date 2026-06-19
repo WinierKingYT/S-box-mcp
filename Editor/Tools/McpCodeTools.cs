@@ -308,6 +308,10 @@ public sealed class {className} : Component
 					if ( !m.Success ) continue;
 					var code = m.Groups[5].Value;
 					var msg  = m.Groups[6].Value.Trim();
+					var bracketIdx = msg.LastIndexOf( '[' );
+					if ( bracketIdx != -1 )
+						msg = msg.Substring( 0, bracketIdx ).Trim();
+
 					errors.Add( new
 					{
 						file     = System.IO.Path.GetFileName( m.Groups[1].Value.Trim() ),

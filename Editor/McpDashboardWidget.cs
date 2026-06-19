@@ -1,4 +1,4 @@
-﻿using Editor;
+using Editor;
 using Sandbox;
 using System;
 using System.Collections.Generic;
@@ -34,7 +34,7 @@ public class McpDashboardWidget : Widget
 	private Label _selectedToolLabel;
 	private LineEdit _toolArgsEdit;
 	private Button _runToolBtn;
-	private Label _toolResultLabel;
+	private TextEdit _toolResultLabel;
 	private Widget _matchingToolsWidget;
 	private Button[] _matchButtons = new Button[5];
 	private string[] _matchToolNames = new string[5];
@@ -42,7 +42,7 @@ public class McpDashboardWidget : Widget
 	private string _selectedToolName = "";
 
 	// ── Logs Page ─────────────────────────────────────────────────────────
-	private Label _logsLabel;
+	private TextEdit _logsLabel;
 	private string _logFilter = "ALL";
 
 	// ── Scene Explorer Page ───────────────────────────────────────────────
@@ -57,7 +57,7 @@ public class McpDashboardWidget : Widget
 	private Widget _trafficListWidget;
 	private Button[] _trafficButtons = new Button[15];
 	private int[] _trafficIndices = new int[15];
-	private Label _trafficDetailLabel;
+	private TextEdit _trafficDetailLabel;
 	private List<McpBridge.ReplayRecord> _lastTrafficSnapshot = new();
 
 	// ── Resource Explorer Page ────────────────────────────────────────────
@@ -65,7 +65,7 @@ public class McpDashboardWidget : Widget
 	private Button[] _resourceButtons;
 	private Label _resourceDescLabel;
 	private LineEdit _resourceArgEdit;
-	private Label _resourceContentLabel;
+	private TextEdit _resourceContentLabel;
 	private List<(string uri, string name, string mimeType, string description, bool isTemplate)> _resourceDefs = new();
 
 	// ─────────────────────────────────────────────────────────────────────
@@ -189,7 +189,8 @@ public class McpDashboardWidget : Widget
 		_runToolBtn.Clicked += () => OnExecuteToolClicked();
 		_toolsContainer.Layout.Add( _runToolBtn );
 
-		_toolResultLabel = new Label( "", _toolsContainer );
+		_toolResultLabel = new TextEdit( _toolsContainer );
+		_toolResultLabel.ReadOnly = true;
 		_toolsContainer.Layout.Add( _toolResultLabel );
 
 		// ════════════════════════════════════════════════════════════════
@@ -239,7 +240,9 @@ public class McpDashboardWidget : Widget
 		AddLogFilter( "Error",    "ERROR" );
 
 		_logsContainer.Layout.Add( logFilterRow );
-		_logsLabel = new Label( "No logs captured yet.", _logsContainer );
+		_logsLabel = new TextEdit( _logsContainer );
+		_logsLabel.ReadOnly = true;
+		_logsLabel.PlainText = "No logs captured yet.";
 		_logsContainer.Layout.Add( _logsLabel );
 
 		// ════════════════════════════════════════════════════════════════
@@ -278,7 +281,9 @@ public class McpDashboardWidget : Widget
 		_trafficContainer.Layout.Add( _trafficListWidget );
 
 		_trafficContainer.Layout.Add( new Label( "Selected Call Detail:", _trafficContainer ) );
-		_trafficDetailLabel = new Label( "Select a call above to inspect.", _trafficContainer );
+		_trafficDetailLabel = new TextEdit( _trafficContainer );
+		_trafficDetailLabel.ReadOnly = true;
+		_trafficDetailLabel.PlainText = "Select a call above to inspect.";
 		_trafficContainer.Layout.Add( _trafficDetailLabel );
 
 		// ════════════════════════════════════════════════════════════════
@@ -316,7 +321,8 @@ public class McpDashboardWidget : Widget
 		resReadBtn.Clicked += () => OnResourceReadClicked();
 		_resourceContainer.Layout.Add( resReadBtn );
 
-		_resourceContentLabel = new Label( "", _resourceContainer );
+		_resourceContentLabel = new TextEdit( _resourceContainer );
+		_resourceContentLabel.ReadOnly = true;
 		_resourceContainer.Layout.Add( _resourceContentLabel );
 
 		// ── Init ─────────────────────────────────────────────────────────
@@ -399,19 +405,19 @@ public class McpDashboardWidget : Widget
 			catch { }
 		}
 		_toolArgsEdit.Text    = template;
-		_toolResultLabel.Text = "";
+		_toolResultLabel.PlainText = "";
 	}
 
 	private async void OnExecuteToolClicked()
 	{
 		if ( string.IsNullOrEmpty( _selectedToolName ) ) return;
-		_toolResultLabel.Text = "Executing...";
+		_toolResultLabel.PlainText = "Executing...";
 		try
 		{
 			var res = await McpEditorServer.ExecuteRegisteredTool( _selectedToolName, _toolArgsEdit.Text );
-			_toolResultLabel.Text = "Result:\n" + JsonSerializer.Serialize( res, new JsonSerializerOptions { WriteIndented = true } );
+			_toolResultLabel.PlainText = "Result:\n" + JsonSerializer.Serialize( res, new JsonSerializerOptions { WriteIndented = true } );
 		}
-		catch ( Exception ex ) { _toolResultLabel.Text = $"Error: {ex.Message}"; }
+		catch ( Exception ex ) { _toolResultLabel.PlainText = $"Error: {ex.Message}"; }
 	}
 
 	// ── Scene Explorer Handlers ───────────────────────────────────────────
@@ -488,7 +494,7 @@ public class McpDashboardWidget : Widget
 			}
 		}
 
-		_trafficDetailLabel.Text = "Select a call above to inspect.";
+		_trafficDetailLabel.PlainText = "Select a call above to inspect.";
 	}
 
 	private void OnTrafficButtonClicked( int buttonIndex )
@@ -497,7 +503,7 @@ public class McpDashboardWidget : Widget
 		if ( recordIndex < 0 || recordIndex >= _lastTrafficSnapshot.Count ) return;
 
 		var r = _lastTrafficSnapshot[recordIndex];
-		_trafficDetailLabel.Text =
+		_trafficDetailLabel.PlainText =
 			$"Method   : {r.Method}\n" +
 			$"Time     : {r.Timestamp.ToLocalTime():HH:mm:ss.fff}\n" +
 			$"Duration : {r.DurationMs}ms\n" +
@@ -526,21 +532,21 @@ public class McpDashboardWidget : Widget
 		var def = _resourceDefs[index];
 		_selectedResourceUri      = def.uri;
 		_resourceDescLabel.Text   = $"URI  : {def.uri}\nType : {def.mimeType}\nDesc : {def.description}";
-		_resourceContentLabel.Text = "";
+		_resourceContentLabel.PlainText = "";
 
 		if ( !def.isTemplate )
 		{
-			_resourceContentLabel.Text = "Loading...";
+			_resourceContentLabel.PlainText = "Loading...";
 			try
 			{
 				var content = McpEditorServer.ReadResourceContent( def.uri );
-				_resourceContentLabel.Text = content.Length > 2000 ? content.Substring( 0, 2000 ) + "\n...(truncated)" : content;
+				_resourceContentLabel.PlainText = content.Length > 50000 ? content.Substring( 0, 50000 ) + "\n...(truncated at 50,000 chars)" : content;
 			}
-			catch ( Exception ex ) { _resourceContentLabel.Text = $"Error: {ex.Message}"; }
+			catch ( Exception ex ) { _resourceContentLabel.PlainText = $"Error: {ex.Message}"; }
 		}
 		else
 		{
-			_resourceContentLabel.Text = "Template resource — enter the path in 'Path / Arg' and click Read.";
+			_resourceContentLabel.PlainText = "Template resource — enter the path in 'Path / Arg' and click Read.";
 		}
 	}
 
@@ -552,17 +558,17 @@ public class McpDashboardWidget : Widget
 		if ( uri.Contains( "{path}" ) )
 		{
 			var arg = _resourceArgEdit.Text.Trim().Replace( "\\", "/" );
-			if ( string.IsNullOrEmpty( arg ) ) { _resourceContentLabel.Text = "Please enter a path first."; return; }
+			if ( string.IsNullOrEmpty( arg ) ) { _resourceContentLabel.PlainText = "Please enter a path first."; return; }
 			uri = uri.Replace( "{path}", arg );
 		}
 
-		_resourceContentLabel.Text = "Loading...";
+		_resourceContentLabel.PlainText = "Loading...";
 		try
 		{
 			var content = McpEditorServer.ReadResourceContent( uri );
-			_resourceContentLabel.Text = content.Length > 2000 ? content.Substring( 0, 2000 ) + "\n...(truncated)" : content;
+			_resourceContentLabel.PlainText = content.Length > 50000 ? content.Substring( 0, 50000 ) + "\n...(truncated at 50,000 chars)" : content;
 		}
-		catch ( Exception ex ) { _resourceContentLabel.Text = $"Error: {ex.Message}"; }
+		catch ( Exception ex ) { _resourceContentLabel.PlainText = $"Error: {ex.Message}"; }
 	}
 
 	// ── Status Handlers ───────────────────────────────────────────────────
@@ -618,7 +624,7 @@ public class McpDashboardWidget : Widget
 			if ( _logFilter != "ALL" )
 				logs = logs.Where( l => l.Contains( $"[{_logFilter}]", StringComparison.OrdinalIgnoreCase ) ).ToList();
 
-			_logsLabel.Text = logs.Count > 0
+			_logsLabel.PlainText = logs.Count > 0
 				? string.Join( "\n", logs.TakeLast( 30 ) )
 				: $"No logs matching filter '{_logFilter}'.";
 		}
