@@ -88,6 +88,11 @@ public class ToolRunner
 			if ( !_registry.TryGet( toolName, out var mdesc, out var instance ) )
 				return (id, id.MethodNotFound( toolName ));
 
+			var schema = SchemaGenerator.Generate( mdesc );
+			var validationError = Validation.ValidateArguments( paramsElement, schema );
+			if ( validationError != null )
+				return (id, id.InvalidParams( validationError ));
+
 			var args = new List<object>();
 			foreach ( var p in mdesc.Parameters )
 			{

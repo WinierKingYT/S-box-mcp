@@ -316,6 +316,8 @@ public static class McpEditorServer
 			_apiKey = apiKey ?? DefaultApiKey;
 		}
 		RegisterBuiltinTools();
+		McpLogBridge.OnLogMessage -= HandleLogMessage;
+		McpLogBridge.OnLogMessage += HandleLogMessage;
 		McpToolBridge.OnToolsChanged += () => _ = BroadcastEventAsync( "notifications/tools/list_changed", "{}" );
 		McpToolBridge.OnProgress += ( progress, total, message ) =>
 		{
@@ -335,6 +337,7 @@ public static class McpEditorServer
 
 	public static void Stop()
 	{
+		McpLogBridge.OnLogMessage -= HandleLogMessage;
 		_cts?.Cancel();
 		_statePollCts?.Cancel();
 		try { _listener?.Stop(); } catch { }
@@ -345,6 +348,11 @@ public static class McpEditorServer
 			try { kv.Value.Stream.Close(); } catch { }
 		}
 		_sessions.Clear();
+	}
+
+	private static void HandleLogMessage( string level, string source, string message )
+	{
+		_ = BroadcastLogAsync( level, source, message );
 	}
 
 	private static void RegisterBuiltinTools()
@@ -1113,6 +1121,15 @@ public static class McpEditorServer
 
 				if ( _tools.TryGetValue( toolName, out var toolDef ) )
 				{
+					var validationError = Validation.ValidateArguments( args, toolDef.InputSchema );
+					if ( validationError != null )
+					{
+						ctx.Response = id.InvalidParams( validationError );
+						if ( sess != null )
+							sess.CurrentToolTask = null;
+						return;
+					}
+
 					var sw = Stopwatch.StartNew();
 					try
 					{
@@ -1168,8 +1185,15 @@ public static class McpEditorServer
 			}
 			else if ( _tools.TryGetValue( method, out var toolDef ) )
 			{
-				var sw = Stopwatch.StartNew();
 				var args = doc.RootElement.TryGetProperty( "params", out var p ) ? p : default;
+				var validationError = Validation.ValidateArguments( args, toolDef.InputSchema );
+				if ( validationError != null )
+				{
+					ctx.Response = id.InvalidParams( validationError );
+					return;
+				}
+
+				var sw = Stopwatch.StartNew();
 				try
 				{
 					var resultObj = await toolDef.Handler( args );
