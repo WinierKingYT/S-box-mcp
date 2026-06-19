@@ -25,12 +25,31 @@ public static class McpEditorServer
 	internal static string _apiKey = DefaultApiKey;
 	private static TcpListener _listener;
 	private static CancellationTokenSource _cts;
-	internal record SseSession( NetworkStream Stream, CancellationTokenSource Cts, System.Threading.SemaphoreSlim WriteLock, string RemoteEndPoint, DateTime ConnectedAt, long RequestCount = 0, string LogLevel = "info" )
+	internal class SseSession
 	{
+		public NetworkStream Stream { get; }
+		public CancellationTokenSource Cts { get; }
+		public System.Threading.SemaphoreSlim WriteLock { get; }
+		public string RemoteEndPoint { get; }
+		public DateTime ConnectedAt { get; }
+		public string LogLevel { get; set; }
 		public CancellationTokenSource ToolCts { get; set; } = new();
 		public Task CurrentToolTask { get; set; }
-		public McpBridge.Middleware.SlidingWindowRateLimiter RateLimiter { get; } = new( DefaultRateLimit );
+		public McpBridge.Middleware.SlidingWindowRateLimiter RateLimiter { get; }
+		public long RequestCount;
+
+		public SseSession( NetworkStream stream, CancellationTokenSource cts, System.Threading.SemaphoreSlim writeLock, string remoteEndPoint, DateTime connectedAt, string logLevel = "info" )
+		{
+			Stream = stream;
+			Cts = cts;
+			WriteLock = writeLock;
+			RemoteEndPoint = remoteEndPoint;
+			ConnectedAt = connectedAt;
+			LogLevel = logLevel;
+			RateLimiter = new McpBridge.Middleware.SlidingWindowRateLimiter( DefaultRateLimit, 60000 );
+		}
 	}
+	private static readonly byte[] _headerEndPattern = new byte[] { (byte)'\r', (byte)'\n', (byte)'\r', (byte)'\n' };
 	internal static readonly ConcurrentDictionary<string, SseSession> _sessions = new();
 	internal record ToolDef( Func<JsonElement, Task<object>> Handler, string Description, string Group = "Editor", object InputSchema = null, object Annotations = null );
 	internal static readonly ConcurrentDictionary<string, ToolDef> _tools = new();
@@ -546,8 +565,11 @@ public static class McpEditorServer
 				{
 					var read = await stream.ReadAsync( buffer, 0, buffer.Length );
 					if ( read == 0 ) return;
-					headerBuf.AddRange( buffer.AsSpan( 0, read ).ToArray() );
-					headerEnd = SearchBytes( headerBuf, "\r\n\r\n" );
+					for ( int i = 0; i < read; i++ )
+					{
+						headerBuf.Add( buffer[i] );
+					}
+					headerEnd = SearchBytes( headerBuf, _headerEndPattern );
 					if ( headerEnd >= 0 ) break;
 				}
 
@@ -633,15 +655,14 @@ public static class McpEditorServer
 		}
 	}
 
-	private static int SearchBytes( List<byte> data, string pattern )
+	private static int SearchBytes( List<byte> data, byte[] pattern )
 	{
-		var pat = Encoding.UTF8.GetBytes( pattern );
-		for ( int i = 0; i <= data.Count - pat.Length; i++ )
+		for ( int i = 0; i <= data.Count - pattern.Length; i++ )
 		{
 			var match = true;
-			for ( int j = 0; j < pat.Length; j++ )
+			for ( int j = 0; j < pattern.Length; j++ )
 			{
-				if ( data[i + j] != pat[j] ) { match = false; break; }
+				if ( data[i + j] != pattern[j] ) { match = false; break; }
 			}
 			if ( match ) return i;
 		}
@@ -784,6 +805,8 @@ public static class McpEditorServer
 	{
 		var sid = Guid.NewGuid().ToString();
 		var cts = new CancellationTokenSource();
+		using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource( cts.Token, _cts.Token );
+		var linkedToken = linkedCts.Token;
 
 		try
 		{
@@ -807,12 +830,12 @@ public static class McpEditorServer
 			_sessions[sid] = new SseSession( stream, cts, new System.Threading.SemaphoreSlim( 1, 1 ), remoteEndPoint, DateTime.UtcNow );
 
 			var eventId = 0L;
-			while ( !cts.IsCancellationRequested && !_cts.IsCancellationRequested )
+			while ( !linkedToken.IsCancellationRequested )
 			{
 				try
 				{
-					await GameTask.Delay( 15000 );
-					if ( cts.IsCancellationRequested || _cts.IsCancellationRequested ) break;
+					await GameTask.Delay( 15000, linkedToken );
+					if ( linkedToken.IsCancellationRequested ) break;
 					var ping = $"id: {++eventId}\nevent: ping\ndata: {DateTime.UtcNow.Ticks}\n\n";
 					var buf = Encoding.UTF8.GetBytes( ping );
 					await stream.WriteAsync( buf, 0, buf.Length );
@@ -838,7 +861,7 @@ public static class McpEditorServer
 	{
 		// Track request count for SSE sessions
 		if ( _sessions.TryGetValue( sid, out var existingSession ) )
-			_sessions[sid] = existingSession with { RequestCount = existingSession.RequestCount + 1 };
+			System.Threading.Interlocked.Increment( ref existingSession.RequestCount );
 
 		await GameTask.MainThread();
 
@@ -938,7 +961,7 @@ public static class McpEditorServer
 				if ( ctx.SessionId != null && ctx.SessionId != "http" && _sessions.TryGetValue( ctx.SessionId, out var sess ) )
 				{
 					var oldLevel = sess.LogLevel;
-					_sessions[ctx.SessionId] = sess with { LogLevel = newLevel };
+					sess.LogLevel = newLevel;
 					_ = BroadcastLogAsync( "info", "server", $"Log level changed: {oldLevel} -> {newLevel}", sourceSessionId: ctx.SessionId );
 				}
 				else

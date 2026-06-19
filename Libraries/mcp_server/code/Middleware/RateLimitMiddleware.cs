@@ -5,15 +5,17 @@ namespace McpBridge.Middleware;
 
 public sealed class SlidingWindowRateLimiter
 {
-	private readonly int _maxPerSecond;
+	private readonly int _maxRequests;
+	private readonly int _windowMs;
 	private readonly long[] _slots;
 	private int _index;
 	private readonly object _lock = new();
 
-	public SlidingWindowRateLimiter( int maxPerSecond = 60 )
+	public SlidingWindowRateLimiter( int maxRequests = 60, int windowMs = 1000 )
 	{
-		_maxPerSecond = maxPerSecond;
-		_slots = new long[maxPerSecond];
+		_maxRequests = maxRequests;
+		_windowMs = windowMs;
+		_slots = new long[maxRequests];
 	}
 
 	public bool TryAcquire()
@@ -21,11 +23,11 @@ public sealed class SlidingWindowRateLimiter
 		lock ( _lock )
 		{
 			var now = DateTime.UtcNow.Ticks / 10000L;
-			var oldest = now - 1000;
+			var oldest = now - _windowMs;
 			if ( _slots[_index] >= oldest )
 				return false;
 			_slots[_index] = now;
-			_index = ( _index + 1 ) % _maxPerSecond;
+			_index = ( _index + 1 ) % _maxRequests;
 			return true;
 		}
 	}

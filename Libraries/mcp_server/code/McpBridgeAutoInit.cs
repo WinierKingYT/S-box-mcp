@@ -30,7 +30,8 @@ public static class McpBridgeAutoInit
 	private static async Task CreateAsync()
 	{
 		await GameTask.MainThread();
-		while ( true )
+		var retries = 0;
+		while ( retries < 20 )
 		{
 			try
 			{
@@ -41,7 +42,10 @@ public static class McpBridgeAutoInit
 
 				var scene = Game.ActiveScene;
 				if ( scene == null )
+				{
+					retries++;
 					continue;
+				}
 
 				var go = new GameObject();
 				go.Name = "MCP Bridge";
@@ -51,6 +55,7 @@ public static class McpBridgeAutoInit
 			}
 			catch
 			{
+				retries++;
 				await GameTask.Delay( 500 );
 			}
 		}

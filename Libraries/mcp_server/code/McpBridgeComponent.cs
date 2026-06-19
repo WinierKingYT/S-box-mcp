@@ -25,10 +25,11 @@ public sealed class McpBridgeComponent : Component
 
 	public static void ShowToast( string message, string type, float duration )
 	{
-		if ( Instance == null ) return;
-		lock ( Instance._toasts )
+		var inst = Instance;
+		if ( inst == null ) return;
+		lock ( inst._toasts )
 		{
-			Instance._toasts.Add( new Toast
+			inst._toasts.Add( new Toast
 			{
 				Message = message,
 				Type = type,

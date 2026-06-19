@@ -112,53 +112,36 @@ public class ToolRunner
 			const int toolTimeoutMs = 30000;
 			if ( !task.IsCompleted )
 			{
-				var timeoutTcs = new TaskCompletionSource<object>();
-				_ = DelayAndComplete( timeoutTcs, toolTimeoutMs );
-				while ( !task.IsCompleted && !timeoutTcs.Task.IsCompleted )
+				var delayTask = Task.Delay( toolTimeoutMs );
+				var completedTask = await Task.WhenAny( task, delayTask );
+				if ( completedTask == delayTask )
 				{
-					await GameTask.Delay( 10 );
+					Interlocked.Increment( ref _totalCalls );
+					McpReplay.Record( toolName, json, "Timed out", sw.ElapsedMilliseconds, false );
+					Log.Warning( $"[MCP] Tool '{toolName}' timed out after {toolTimeoutMs}ms" );
+					return (id, id.TimeoutError( toolName ));
 				}
 			}
-			if ( !task.IsCompleted )
-			{
-				Interlocked.Increment( ref _totalCalls );
-				McpReplay.Record( toolName, json, "Timed out", sw.ElapsedMilliseconds, false );
-				Log.Warning( $"[MCP] Tool '{toolName}' timed out after {toolTimeoutMs}ms" );
-				return (id, id.TimeoutError( toolName ));
-			}
 			await task;
-				var taskDesc = TypeLibrary.GetType( task.GetType() );
-				var resultProp = taskDesc?.Properties.FirstOrDefault( p => p.Name == "Result" && p.CanRead );
-				if ( resultProp != null )
-					res = resultProp.GetValue( task );
-				else
-					res = null;
-			}
-			Interlocked.Increment( ref _totalCalls );
-			var resText = JsonSerializer.Serialize( res, JsonRpcExtensions.SerializerOpts );
-			McpReplay.Record( toolName, json, resText, sw.ElapsedMilliseconds, true );
+			var taskDesc = TypeLibrary.GetType( task.GetType() );
+			var resultProp = taskDesc?.Properties.FirstOrDefault( p => p.Name == "Result" && p.CanRead );
+			if ( resultProp != null )
+				res = resultProp.GetValue( task );
+			else
+				res = null;
+		}
+		Interlocked.Increment( ref _totalCalls );
+		var resText = JsonSerializer.Serialize( res, JsonRpcExtensions.SerializerOpts );
+		McpReplay.Record( toolName, json, resText, sw.ElapsedMilliseconds, true );
 
-			var response = id.ToOk( JsonSerializer.Serialize( new { content = new[] { new { type = "text", text = resText } }, _meta = new { durationMs = Math.Round( sw.Elapsed.TotalMilliseconds, 1 ), toolName } } ) );
-			return (id, response);
-		}
-		catch ( Exception ex )
-		{
-			Interlocked.Increment( ref _totalCalls );
-			McpReplay.Record( toolName ?? "unknown", json, ex.Message, 0, false );
-			return (id, id.InternalError( ex.InnerException?.Message ?? ex.Message ?? "Unknown error" ));
-		}
+		var response = id.ToOk( JsonSerializer.Serialize( new { content = new[] { new { type = "text", text = resText } }, _meta = new { durationMs = Math.Round( sw.Elapsed.TotalMilliseconds, 1 ), toolName } } ) );
+		return (id, response);
 	}
-
-	private static async Task DelayAndComplete( TaskCompletionSource<object> tcs, int ms )
+	catch ( Exception ex )
 	{
-		try
-		{
-			await GameTask.Delay( ms );
-			tcs.TrySetResult( null );
-		}
-		catch
-		{
-			tcs.TrySetResult( null );
-		}
+		Interlocked.Increment( ref _totalCalls );
+		McpReplay.Record( toolName ?? "unknown", json, ex.Message, 0, false );
+		return (id, id.InternalError( ex.InnerException?.Message ?? ex.Message ?? "Unknown error" ));
 	}
+}
 }
