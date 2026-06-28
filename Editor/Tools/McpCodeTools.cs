@@ -6,6 +6,9 @@ using System.Diagnostics;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace Editor;
 
@@ -256,6 +259,8 @@ public sealed class {className} : Component
 				var patched = original.Replace( oldText, newText );
 				System.IO.File.WriteAllText( absPath, patched );
 
+				McpBridge.MemoryValidator.RecordCodeModification( path, newText, "patch_script" );
+
 				// Trigger compile
 				object buildResult;
 				try
@@ -274,6 +279,7 @@ public sealed class {className} : Component
 					var stderr = await proc.StandardError.ReadToEndAsync();
 					await proc.WaitForExitAsync();
 					buildResult = new { exitCode = proc.ExitCode, output = (stdout + stderr).Trim() };
+					McpBridge.MemoryValidator.OnCompilationFinished( proc.ExitCode == 0, (stdout + stderr).Trim() );
 				}
 				catch ( Exception be ) { buildResult = new { error = be.Message }; }
 
@@ -467,6 +473,8 @@ public sealed class {className} : Component
 
 				System.IO.File.WriteAllText( absPath, patched );
 
+				McpBridge.MemoryValidator.RecordCodeModification( path, replacementCode, $"modify_code_block:{mode}" );
+
 				object buildResult;
 				try
 				{
@@ -484,6 +492,7 @@ public sealed class {className} : Component
 					var stderr = await proc.StandardError.ReadToEndAsync();
 					await proc.WaitForExitAsync();
 					buildResult = new { exitCode = proc.ExitCode, output = (stdout + stderr).Trim() };
+					McpBridge.MemoryValidator.OnCompilationFinished( proc.ExitCode == 0, (stdout + stderr).Trim() );
 				}
 				catch ( Exception be ) { buildResult = new { error = be.Message }; }
 
@@ -491,5 +500,103 @@ public sealed class {className} : Component
 			}
 			catch ( Exception e ) { return (object)new { error = e.Message }; }
 		}, new { type = "object", properties = new { path = new { type = "string", description = "Relative .cs path" }, target_signature = new { type = "string", description = "Exact signature to locate" }, replacement_code = new { type = "string", description = "New code block" }, mode = new { type = "string", description = "Mod mode: replace_body, replace_method, inject_before, inject_after" } }, required = new[] { "path", "target_signature", "replacement_code" } }, annotations: new { destructiveHint = true }, runOnMainThread: false );
+
+		McpEditorServer.RegisterTool( "sbox_dry_run_code", "Dry-run C# code by compiling it in-memory using Roslyn and performing static AST analysis to detect unsafe blocks, P/Invokes, or native pointers that could crash the engine.", args =>
+		{
+			var code = args.GetProperty( "code" ).GetString() ?? "";
+			var filename = args.TryGetProperty( "filename", out var fn ) ? fn.GetString() ?? "DryRunTemp.cs" : "DryRunTemp.cs";
+
+			try
+			{
+				var syntaxTree = CSharpSyntaxTree.ParseText( code );
+				var root = syntaxTree.GetRoot();
+
+				var violations = new List<string>();
+
+				var hasUnsafe = root.DescendantNodes().Any( n => n.IsKind( SyntaxKind.UnsafeStatement ) ) || root.DescendantTokens().Any( t => t.IsKind( SyntaxKind.UnsafeKeyword ) );
+				if ( hasUnsafe )
+				{
+					violations.Add( "Unsafe code blocks are not allowed in Sandbox execution." );
+				}
+
+				var hasPointer = root.DescendantNodes().Any( n => n.IsKind( SyntaxKind.PointerType ) || n.IsKind( SyntaxKind.PointerMemberAccessExpression ) );
+				if ( hasPointer )
+				{
+					violations.Add( "Native pointer types and pointer member accesses are strictly prohibited to prevent memory corruption." );
+				}
+
+				var attributes = root.DescendantNodes().OfType<AttributeSyntax>();
+				foreach ( var attr in attributes )
+				{
+					var name = attr.Name.ToString();
+					if ( name.Contains( "DllImport" ) || name.Contains( "LibraryImport" ) || name.Contains( "MarshalAs" ) )
+					{
+						violations.Add( $"Native Interop attribute '{name}' is not allowed in Dry-Run sandbox." );
+					}
+				}
+
+				if ( violations.Count > 0 )
+				{
+					return new
+					{
+						success = false,
+						safe = false,
+						violations
+					};
+				}
+
+				var assemblyName = System.IO.Path.GetRandomFileName();
+				
+				var references = AppDomain.CurrentDomain.GetAssemblies()
+					.Where( a => !a.IsDynamic && !string.IsNullOrEmpty( a.Location ) )
+					.Select( a => MetadataReference.CreateFromFile( a.Location ) )
+					.Cast<MetadataReference>()
+					.ToList();
+
+				var compilation = CSharpCompilation.Create(
+					assemblyName,
+					new[] { syntaxTree },
+					references,
+					new CSharpCompilationOptions( OutputKind.DynamicallyLinkedLibrary ) );
+
+				using var ms = new System.IO.MemoryStream();
+				var result = compilation.Emit( ms );
+
+				if ( !result.Success )
+				{
+					var errors = result.Diagnostics
+						.Where( d => d.Severity == DiagnosticSeverity.Error )
+						.Select( d => new
+						{
+							line = d.Location.GetLineSpan().StartLinePosition.Line + 1,
+							col = d.Location.GetLineSpan().StartLinePosition.Character + 1,
+							id = d.Id,
+							message = d.GetMessage()
+						} )
+						.ToList();
+
+					return new
+					{
+						success = false,
+						safe = true,
+						compiled = false,
+						errorCount = errors.Count,
+						errors
+					};
+				}
+
+				return new
+				{
+					success = true,
+					safe = true,
+					compiled = true,
+					note = "Code compiled successfully and contains no safety violations."
+				};
+			}
+			catch ( Exception e )
+			{
+				return new { success = false, error = e.Message };
+			}
+		}, new { type = "object", properties = new { code = new { type = "string", description = "C# source code to dry-run" }, filename = new { type = "string", description = "Mock filename (default DryRunTemp.cs)" } }, required = new[] { "code" } } );
 	}
 }

@@ -544,6 +544,12 @@ public class SceneTools
 		catch ( Exception e ) { return new { error = e.Message }; }
 	}
 
+	[McpTool("sbox_rewind_state", "Rewinds the game state (transforms of key objects and synced variables) to a specified number of seconds ago (max 60 seconds).", DestructiveHint = true)]
+	public object RewindState( float secondsAgo )
+	{
+		return McpStateTimeTravel.Rewind( secondsAgo );
+	}
+
 	private static DirectionalLight FindDirectionalLight( Scene scene, string lightGuid = null )
 	{
 		if ( lightGuid != null && Guid.TryParse( lightGuid, out var guid ) ) { var go = scene.Directory.FindByGuid( guid ); if ( go.IsValid() ) return go.Components.Get<DirectionalLight>(); }

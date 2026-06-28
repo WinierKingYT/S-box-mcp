@@ -590,4 +590,186 @@ public class AssetTools
 		}
 		return null;
 	}
+
+	[McpTool("sbox_generate_asset", "Procedurally generates wav audio or bmp texture assets and writes them atomically to the project directories to prevent IO kilitlenmeleri.", OptionalParams = new[]{"waveType", "frequency", "duration", "pattern", "width", "height", "colorHex"}, DestructiveHint = true)]
+	public object GenerateAsset( string path, string type, string waveType = "sine", float frequency = 440f, float duration = 1.0f, string pattern = "solid", int width = 256, int height = 256, string colorHex = "#ffffff" )
+	{
+		try
+		{
+			if ( string.IsNullOrEmpty( path ) ) return new { error = "Path cannot be empty" };
+			if ( path.Contains( ".." ) ) return new { error = "Path traversal not allowed" };
+
+			byte[] assetBytes;
+			var t = type.ToLowerInvariant();
+			if ( t == "audio" || t == "sound" )
+			{
+				if ( !path.EndsWith( ".wav", StringComparison.OrdinalIgnoreCase ) )
+					return new { error = "Audio assets must have a .wav extension" };
+				assetBytes = GenerateWavBytes( waveType, frequency, duration );
+			}
+			else if ( t == "texture" || t == "image" )
+			{
+				if ( !path.EndsWith( ".bmp", StringComparison.OrdinalIgnoreCase ) && !path.EndsWith( ".png", StringComparison.OrdinalIgnoreCase ) )
+					return new { error = "Texture assets generated procedurally must be written as .bmp or .png" };
+				
+				Color color = Color.White;
+				if ( !string.IsNullOrEmpty( colorHex ) )
+				{
+					Color.TryParse( colorHex, out color );
+				}
+				assetBytes = GenerateBmpBytes( pattern, width, height, color );
+			}
+			else
+			{
+				return new { error = $"Unsupported asset type '{type}'. Choose 'audio' or 'texture'." };
+			}
+
+			var tempDir = "temp_assets";
+			if ( !System.IO.Directory.Exists( tempDir ) )
+			{
+				System.IO.Directory.CreateDirectory( tempDir );
+			}
+
+			var tempFilePath = System.IO.Path.Combine( tempDir, Guid.NewGuid().ToString() + ".tmp" );
+			System.IO.File.WriteAllBytes( tempFilePath, assetBytes );
+
+			var destFullPath = System.IO.Path.Combine( System.IO.Directory.GetCurrentDirectory(), path.Replace( "/", System.IO.Path.DirectorySeparatorChar.ToString() ) );
+			var destDir = System.IO.Path.GetDirectoryName( destFullPath );
+			if ( !System.IO.Directory.Exists( destDir ) )
+			{
+				System.IO.Directory.CreateDirectory( destDir );
+			}
+
+			if ( System.IO.File.Exists( destFullPath ) )
+			{
+				System.IO.File.Delete( destFullPath );
+			}
+			System.IO.File.Move( tempFilePath, destFullPath );
+
+			return new { success = true, path, type, sizeBytes = assetBytes.Length, note = "Asset generated and swapped atomically." };
+		}
+		catch ( Exception e )
+		{
+			return new { error = e.Message };
+		}
+	}
+
+	private static byte[] GenerateWavBytes( string waveType, float frequency, float duration )
+	{
+		int sampleRate = 22050;
+		int numSamples = (int)(sampleRate * duration);
+		int subChunk2Size = numSamples * 2;
+		int chunkSize = 36 + subChunk2Size;
+
+		var ms = new System.IO.MemoryStream();
+		using var bw = new System.IO.BinaryWriter( ms );
+
+		bw.Write( System.Text.Encoding.ASCII.GetBytes( "RIFF" ) );
+		bw.Write( chunkSize );
+		bw.Write( System.Text.Encoding.ASCII.GetBytes( "WAVE" ) );
+
+		bw.Write( System.Text.Encoding.ASCII.GetBytes( "fmt " ) );
+		bw.Write( 16 );
+		bw.Write( (short)1 );
+		bw.Write( (short)1 );
+		bw.Write( sampleRate );
+		bw.Write( sampleRate * 2 );
+		bw.Write( (short)2 );
+		bw.Write( (short)16 );
+
+		bw.Write( System.Text.Encoding.ASCII.GetBytes( "data" ) );
+		bw.Write( subChunk2Size );
+
+		var random = new Random();
+		for ( int i = 0; i < numSamples; i++ )
+		{
+			double t = (double)i / sampleRate;
+			double value = 0;
+			var wt = waveType.ToLowerInvariant();
+			if ( wt == "sine" )
+				value = Math.Sin( 2.0 * Math.PI * frequency * t );
+			else if ( wt == "square" )
+				value = Math.Sign( Math.Sin( 2.0 * Math.PI * frequency * t ) );
+			else if ( wt == "sawtooth" )
+				value = 2.0 * (t * frequency - Math.Floor( 0.5 + t * frequency ));
+			else
+				value = random.NextDouble() * 2.0 - 1.0;
+
+			bw.Write( (short)(value * 28000) );
+		}
+
+		return ms.ToArray();
+	}
+
+	private static byte[] GenerateBmpBytes( string pattern, int width, int height, Color color )
+	{
+		int rowSize = ((width * 24 + 31) / 32) * 4;
+		int pixelDataSize = rowSize * height;
+		int fileSize = 54 + pixelDataSize;
+
+		var ms = new System.IO.MemoryStream();
+		using var bw = new System.IO.BinaryWriter( ms );
+
+		bw.Write( (byte)'B' );
+		bw.Write( (byte)'M' );
+		bw.Write( fileSize );
+		bw.Write( (int)0 );
+		bw.Write( 54 );
+
+		bw.Write( 40 );
+		bw.Write( width );
+		bw.Write( height );
+		bw.Write( (short)1 );
+		bw.Write( (short)24 );
+		bw.Write( 0 );
+		bw.Write( pixelDataSize );
+		bw.Write( 2835 );
+		bw.Write( 2835 );
+		bw.Write( 0 );
+		bw.Write( 0 );
+
+		byte r = (byte)(color.r * 255f);
+		byte g = (byte)(color.g * 255f);
+		byte b = (byte)(color.b * 255f);
+
+		var random = new Random();
+
+		for ( int y = 0; y < height; y++ )
+		{
+			int bytesWritten = 0;
+			for ( int x = 0; x < width; x++ )
+			{
+				byte pr = r, pg = g, pb = b;
+				var pat = pattern.ToLowerInvariant();
+				if ( pat == "grid" )
+				{
+					if ( x % 32 == 0 || y % 32 == 0 )
+					{
+						pr = (byte)(255 - r);
+						pg = (byte)(255 - g);
+						pb = (byte)(255 - b);
+					}
+				}
+				else if ( pat == "noise" )
+				{
+					float noise = (float)random.NextDouble() * 0.4f - 0.2f;
+					pr = (byte)Math.Clamp( r + noise * 255f, 0, 255 );
+					pg = (byte)Math.Clamp( g + noise * 255f, 0, 255 );
+					pb = (byte)Math.Clamp( b + noise * 255f, 0, 255 );
+				}
+
+				bw.Write( pb );
+				bw.Write( pg );
+				bw.Write( pr );
+				bytesWritten += 3;
+			}
+			while ( bytesWritten < rowSize )
+			{
+				bw.Write( (byte)0 );
+				bytesWritten++;
+			}
+		}
+
+		return ms.ToArray();
+	}
 }

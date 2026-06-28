@@ -60,6 +60,8 @@ public sealed class McpBridgeComponent : Component
 
 	protected override void OnUpdate()
 	{
+		McpStateTimeTravel.Tick();
+
 		lock ( _toasts )
 		{
 			_toasts.RemoveAll( t => t.TimeSinceCreated >= t.Duration );

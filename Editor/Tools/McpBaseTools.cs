@@ -90,6 +90,31 @@ internal static class McpBaseTools
 			return new { success = true, currentFocus = McpEditorServer.CurrentFocus };
 		}, new { type = "object", properties = new { focus = new { type = "string", description = "The focus area: ui, physics, scene, code, or all" } }, required = new[] { "focus" } } );
 
+		McpEditorServer.RegisterTool( "sbox_query_memory", "Query the episodic memory layer for past coding pattern successes (pattern) or failure warnings (antipattern) matching the query terms.", args =>
+		{
+			var query = args.TryGetProperty( "query", out var q ) ? q.GetString() ?? "" : "";
+			var type = args.TryGetProperty( "type", out var t ) ? t.GetString() ?? "" : "";
+			var maxResults = args.TryGetProperty( "maxResults", out var mr ) ? mr.GetInt32() : 10;
+			var results = McpBridge.MemoryStore.Search( query, string.IsNullOrEmpty( type ) ? null : type, maxResults );
+			return new
+			{
+				success = true,
+				query,
+				type = string.IsNullOrEmpty( type ) ? "all" : type,
+				count = results.Count,
+				memories = results.Select( e => new
+				{
+					e.Id,
+					type = e.Type,
+					path = e.Path,
+					context = e.Context,
+					description = e.Description,
+					codeSnippet = e.CodeSnippet,
+					timestamp = e.Timestamp.ToString( "yyyy-MM-dd HH:mm:ss" )
+				} ).ToList()
+			};
+		}, new { type = "object", properties = new { query = new { type = "string", description = "Query search terms" }, type = new { type = "string", description = "Filter by type: pattern or antipattern" }, maxResults = new { type = "integer", description = "Max results (default 10)" } }, required = Array.Empty<string>() } );
+
 		McpEditorServer.RegisterTool( "sbox_mcp_clients", "List all connected SSE clients and their stats", _ =>
 		{
 			var now = DateTime.UtcNow;
