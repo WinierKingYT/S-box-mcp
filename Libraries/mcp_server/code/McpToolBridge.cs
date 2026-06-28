@@ -257,4 +257,24 @@ public static class McpToolBridge
 	{
 		return _eventSubscriptions.ContainsKey( eventType );
 	}
+
+	public static event Action<string, string> OnGameEvent;
+
+	public static void EmitEvent( string eventType, string dataJson )
+	{
+		OnGameEvent?.Invoke( eventType, dataJson );
+	}
+}
+
+public static class McpEventSystem
+{
+	public static void Emit( string eventType, object data )
+	{
+		try
+		{
+			var json = JsonSerializer.Serialize( data, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase } );
+			McpToolBridge.EmitEvent( eventType, json );
+		}
+		catch { }
+	}
 }

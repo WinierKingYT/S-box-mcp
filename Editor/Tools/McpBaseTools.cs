@@ -76,10 +76,19 @@ internal static class McpBaseTools
 					all.Add( entry );
 				}
 			}
-			var total = all.Count;
-			var paged = all.Skip( (page - 1) * perPage ).Take( perPage ).ToList();
+			var filteredList = McpEditorServer.ApplyFocusFilter( all ).ToList();
+			var total = filteredList.Count;
+			var paged = filteredList.Skip( (page - 1) * perPage ).Take( perPage ).ToList();
 			return new { total, page, perPage, tools = paged };
 		}, new { type = "object", properties = new { page = new { type = "number", description = "Page number (1-based)" }, perPage = new { type = "number", description = "Results per page (max 500)" }, query = new { type = "string", description = "Search query" }, group = new { type = "string", description = "Filter by group" } }, required = Array.Empty<string>() }, annotations: new { readOnlyHint = true }, runOnMainThread: false );
+
+		McpEditorServer.RegisterTool( "sbox_set_context_focus", "Prune the available tools schema to a specific focus area ('ui', 'physics', 'scene', 'code', 'all') to reduce token usage and improve LLM tool selection.", args =>
+		{
+			var focus = args.TryGetProperty( "focus", out var f ) ? f.GetString() ?? "all" : "all";
+			McpEditorServer.CurrentFocus = focus;
+			McpEditorServer.TriggerToolsChanged();
+			return new { success = true, currentFocus = McpEditorServer.CurrentFocus };
+		}, new { type = "object", properties = new { focus = new { type = "string", description = "The focus area: ui, physics, scene, code, or all" } }, required = new[] { "focus" } } );
 
 		McpEditorServer.RegisterTool( "sbox_mcp_clients", "List all connected SSE clients and their stats", _ =>
 		{

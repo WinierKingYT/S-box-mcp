@@ -112,9 +112,14 @@ public class ToolRunner
 			const int toolTimeoutMs = 30000;
 			if ( !task.IsCompleted )
 			{
-				var delayTask = Task.Delay( toolTimeoutMs );
-				var completedTask = await Task.WhenAny( task, delayTask );
-				if ( completedTask == delayTask )
+				int elapsed = 0;
+				while ( !task.IsCompleted && elapsed < toolTimeoutMs )
+				{
+					await Task.Delay( 50 );
+					elapsed += 50;
+				}
+
+				if ( !task.IsCompleted )
 				{
 					Interlocked.Increment( ref _totalCalls );
 					McpReplay.Record( toolName, json, "Timed out", sw.ElapsedMilliseconds, false );
@@ -140,8 +145,9 @@ public class ToolRunner
 	catch ( Exception ex )
 	{
 		Interlocked.Increment( ref _totalCalls );
-		McpReplay.Record( toolName ?? "unknown", json, ex.Message, 0, false );
-		return (id, id.InternalError( ex.InnerException?.Message ?? ex.Message ?? "Unknown error" ));
+		var fullErr = ex.ToString();
+		McpReplay.Record( toolName ?? "unknown", json, fullErr, 0, false );
+		return (id, id.InternalError( fullErr ));
 	}
 }
 }

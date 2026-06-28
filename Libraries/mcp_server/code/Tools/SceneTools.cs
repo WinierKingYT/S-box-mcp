@@ -242,6 +242,97 @@ public class SceneTools
 	[McpTool("sbox_navmesh_status", "Returns navmesh availability.", ReadOnlyHint = true)] public object NavMeshStatus() { try { return new { success = true, isAvailable = NavMeshHelper.IsAvailable, isLoaded = NavMeshHelper.IsLoaded }; } catch ( Exception e ) { return new { error = e.Message }; } }
 	[McpTool("sbox_navmesh_random_point", "Returns a random point on the navmesh.", OptionalParams = new[]{"radius"}, ReadOnlyHint = true)] public object NavMeshRandomPoint( float cx, float cy, float cz, float radius = 500f ) { if ( !NavMeshHelper.IsAvailable ) return new { error = "NavMesh not available" }; try { var pt = NavMeshHelper.GetRandomPoint( new Vector3( cx, cy, cz ), radius ); return pt.HasValue ? new { success = true, point = new { x = pt.Value.x, y = pt.Value.y, z = pt.Value.z } } : new { error = "No point found" }; } catch ( Exception e ) { return new { error = e.Message }; } }
 
+	[McpTool("sbox_get_waypoint_graph", "Generates a simplified weighted node graph of key interest points (shelves, checkout zones, spawners) in the scene connected by NavMesh path distances.", ReadOnlyHint = true)]
+	public object GetWaypointGraph()
+	{
+		var scene = Game.ActiveScene;
+		if ( scene == null ) return new { error = "No active scene" };
+		if ( !NavMeshHelper.IsAvailable ) return new { error = "NavMesh not available" };
+
+		try
+		{
+			var keyObjects = new List<GameObject>();
+			foreach ( var go in scene.GetAllObjects( true ) )
+			{
+				if ( !go.IsValid() ) continue;
+
+				bool isLandmark = go.Components.GetAll<Component>().Any( c => 
+					c.GetType().Name.Contains( "Shelf" ) || 
+					c.GetType().Name.Contains( "Register" ) || 
+					c.GetType().Name.Contains( "Spawner" ) || 
+					c.GetType().Name.Contains( "Desk" ) || 
+					c.GetType().Name.Contains( "BlackMarket" ) || 
+					c.GetType().Name.Contains( "GameManager" ) 
+				);
+
+				if ( isLandmark && !keyObjects.Any( k => k.Id == go.Id ) )
+				{
+					keyObjects.Add( go );
+				}
+			}
+
+			if ( keyObjects.Count == 0 )
+			{
+				foreach ( var go in scene.GetAllObjects( true ) )
+				{
+					if ( !go.IsValid() ) continue;
+					if ( go.Components.GetAll<Collider>().Any() && !string.IsNullOrEmpty( go.Name ) && go.Name != "GameObject" )
+					{
+						keyObjects.Add( go );
+						if ( keyObjects.Count >= 20 ) break;
+					}
+				}
+			}
+
+			var nodes = keyObjects.Select( go => new
+			{
+				id = go.Id,
+				name = go.Name,
+				position = new { x = go.WorldPosition.x, y = go.WorldPosition.y, z = go.WorldPosition.z }
+			} ).ToList();
+
+			var edges = new List<object>();
+			for ( int i = 0; i < keyObjects.Count; i++ )
+			{
+				var nodeA = keyObjects[i];
+				var posA = NavMeshHelper.GetClosestPoint( nodeA.WorldPosition );
+				if ( !posA.HasValue ) continue;
+
+				for ( int j = i + 1; j < keyObjects.Count; j++ )
+				{
+					var nodeB = keyObjects[j];
+					var posB = NavMeshHelper.GetClosestPoint( nodeB.WorldPosition );
+					if ( !posB.HasValue ) continue;
+
+					var path = NavMeshHelper.BuildPath( posA.Value, posB.Value );
+					if ( path != null && path.Count > 0 )
+					{
+						var dist = NavMeshHelper.GetPathDistance( path );
+						edges.Add( new
+						{
+							from = nodeA.Id,
+							to = nodeB.Id,
+							weight = dist
+						} );
+					}
+				}
+			}
+
+			return new
+			{
+				success = true,
+				nodeCount = nodes.Count,
+				edgeCount = edges.Count,
+				nodes,
+				edges
+			};
+		}
+		catch ( Exception e )
+		{
+			return new { error = e.Message };
+		}
+	}
+
 	[McpTool("sbox_set_wind", "Sets wind direction and speed. Note: WindComponent not available in this SDK version.", OptionalParams = new[]{"directionX", "directionY", "directionZ", "speed"}, DestructiveHint = true)]
 	public object SetWind( float directionX = 0, float directionY = 1, float directionZ = 0, float speed = 100 )
 	{
@@ -347,6 +438,110 @@ public class SceneTools
 				gravity = scene.PhysicsWorld.Gravity
 			}
 		};
+	}
+
+	[McpTool("sbox_capture_screenshot", "Captures a screenshot of the active game view and returns it as a Base64-encoded PNG.", ReadOnlyHint = true)]
+	public object CaptureScreenshot()
+	{
+		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
+		try
+		{
+			var screenshotsDir = @"C:\Program Files (x86)\Steam\steamapps\common\sbox\screenshots";
+			if ( !System.IO.Directory.Exists( screenshotsDir ) )
+			{
+				return new { error = "Screenshots directory not found at " + screenshotsDir };
+			}
+
+			var existingFiles = System.IO.Directory.GetFiles( screenshotsDir )
+				.Select( System.IO.Path.GetFileName )
+				.ToHashSet();
+
+			Sandbox.Game.TakeScreenshot();
+
+			string newFilePath = null;
+			for ( int i = 0; i < 60; i++ )
+			{
+				System.Threading.Thread.Sleep( 50 );
+				var currentFiles = System.IO.Directory.GetFiles( screenshotsDir );
+				foreach ( var file in currentFiles )
+				{
+					var name = System.IO.Path.GetFileName( file );
+					if ( !existingFiles.Contains( name ) && ( name.EndsWith( ".png" ) || name.EndsWith( ".jpg" ) ) )
+					{
+						newFilePath = file;
+						break;
+					}
+				}
+				if ( newFilePath != null ) break;
+			}
+
+			if ( newFilePath == null )
+			{
+				return new { error = "Screenshot file was not generated on disk in time" };
+			}
+
+			var bytes = System.IO.File.ReadAllBytes( newFilePath );
+			var base64 = Convert.ToBase64String( bytes );
+
+			try { System.IO.File.Delete( newFilePath ); } catch { }
+
+			return new { success = true, base64 = base64, mimeType = "image/png" };
+		}
+		catch ( Exception e )
+		{
+			return new { error = e.Message };
+		}
+	}
+
+	[McpTool("sbox_spatial_query", "Query physics colliders in the scene. Support box overlap (specify minX/minY/minZ and maxX/maxY/maxZ) or sphere overlap (specify centerX/centerY/centerZ and radius).", OptionalParams = new[]{"minX", "minY", "minZ", "maxX", "maxY", "maxZ", "centerX", "centerY", "centerZ", "radius"}, ReadOnlyHint = true)]
+	public object SpatialQuery(
+		float? minX = null, float? minY = null, float? minZ = null,
+		float? maxX = null, float? maxY = null, float? maxZ = null,
+		float? centerX = null, float? centerY = null, float? centerZ = null,
+		float? radius = null )
+	{
+		var scene = Game.ActiveScene; if ( scene == null ) return new { error = "No active scene" };
+		try
+		{
+			var hits = new List<object>();
+			var seen = new HashSet<Guid>();
+
+			if ( minX.HasValue && minY.HasValue && minZ.HasValue && maxX.HasValue && maxY.HasValue && maxZ.HasValue )
+			{
+				var queryMins = new Vector3( minX.Value, minY.Value, minZ.Value );
+				var queryMaxs = new Vector3( maxX.Value, maxY.Value, maxZ.Value );
+				var queryBounds = new BBox( queryMins, queryMaxs );
+				foreach ( var col in scene.GetAllComponents<Collider>() )
+				{
+					if ( !col.IsValid() ) continue;
+					var colBounds = col.GetWorldBounds();
+					if ( colBounds.Overlaps( queryBounds ) && !seen.Contains( col.GameObject.Id ) )
+					{
+						seen.Add( col.GameObject.Id );
+						hits.Add( new { name = col.GameObject.Name, guid = col.GameObject.Id, type = col.GetType().Name } );
+					}
+				}
+				return new { success = true, mode = "box", mins = queryMins, maxs = queryMaxs, count = hits.Count, hits };
+			}
+			else if ( centerX.HasValue && centerY.HasValue && centerZ.HasValue && radius.HasValue )
+			{
+				var center = new Vector3( centerX.Value, centerY.Value, centerZ.Value );
+				var radiusSq = radius.Value * radius.Value;
+				foreach ( var col in scene.GetAllComponents<Collider>() )
+				{
+					if ( !col.IsValid() ) continue;
+					var distSq = col.WorldPosition.DistanceSquared( center );
+					if ( distSq <= radiusSq && !seen.Contains( col.GameObject.Id ) )
+					{
+						seen.Add( col.GameObject.Id );
+						hits.Add( new { name = col.GameObject.Name, guid = col.GameObject.Id, type = col.GetType().Name, distance = MathF.Sqrt( distSq ) } );
+					}
+				}
+				return new { success = true, mode = "sphere", center, radius = radius.Value, count = hits.Count, hits };
+			}
+			return new { error = "Invalid query arguments. Provide either box coordinates (minX, minY, minZ, maxX, maxY, maxZ) or sphere coordinates (centerX, centerY, centerZ, radius)." };
+		}
+		catch ( Exception e ) { return new { error = e.Message }; }
 	}
 
 	private static DirectionalLight FindDirectionalLight( Scene scene, string lightGuid = null )

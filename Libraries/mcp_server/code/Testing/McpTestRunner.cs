@@ -37,7 +37,7 @@ public class McpTestRunner
 		}
 		catch ( Exception e )
 		{
-			results.Add( new TestResult { Name = name, Status = "FAIL", Error = e.Message } );
+			results.Add( new TestResult { Name = name, Status = "FAIL", Error = e.ToString() } );
 		}
 	}
 }

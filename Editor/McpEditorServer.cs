@@ -19,6 +19,61 @@ namespace Editor;
 
 public static class McpEditorServer
 {
+	public static string CurrentFocus { get; set; } = "all";
+
+	public static IEnumerable<Dictionary<string, object>> ApplyFocusFilter( IEnumerable<Dictionary<string, object>> tools )
+	{
+		var focus = (CurrentFocus ?? "all").ToLowerInvariant();
+		if ( focus == "all" ) return tools;
+
+		return tools.Where( t =>
+		{
+			var name = ( (string)t["name"] ).ToLowerInvariant();
+			var group = ( (string)t["group"] ?? "" ).ToLowerInvariant();
+
+			if ( name == "list_tools" || name == "sbox_mcp_clients" || name == "sbox_mcp_bridge_status" ||
+				 name == "get_game_state" || name == "sbox_replay_history" || name == "sbox_replay_analytics" ||
+				 name == "sbox_undo" || name == "sbox_redo" || name == "sbox_undo_history" ||
+				 name == "sbox_batch" || name == "sbox_set_context_focus" )
+			{
+				return true;
+			}
+
+			if ( focus == "ui" || focus == "widget" )
+			{
+				return name.Contains( "_ui_" ) || group == "ui" || group == "widget";
+			}
+
+			if ( focus == "code" || focus == "script" )
+			{
+				return name.Contains( "_file" ) || name.Contains( "_script" ) || name.Contains( "_project" ) ||
+					   name.Contains( "_code" ) || name.Contains( "_errors" ) || group == "code" || group == "script";
+			}
+
+			if ( focus == "scene" || focus == "object" )
+			{
+				return name.Contains( "_scene" ) || name.Contains( "_gameobject" ) || name.Contains( "_object" ) ||
+					   name.Contains( "_transform" ) || name.Contains( "_component" ) || name.Contains( "_prefab" ) ||
+					   name.Contains( "_asset" ) || name.Contains( "_spatial" ) || name.Contains( "_screenshot" ) ||
+					   group == "scene" || group == "asset" || group == "core";
+			}
+
+			if ( focus == "physics" )
+			{
+				return name.Contains( "_physics" ) || name.Contains( "_impulse" ) || name.Contains( "_raycast" ) ||
+					   name.Contains( "_force" ) || name.Contains( "_torque" ) || name.Contains( "_gravity" ) ||
+					   group == "physics";
+			}
+
+			return true;
+		} );
+	}
+
+	public static void TriggerToolsChanged()
+	{
+		_ = BroadcastEventAsync( "notifications/tools/list_changed", "{}" );
+	}
+
 	private static readonly JsonSerializerOptions IndentedJsonOpts = new() { WriteIndented = true };
 	private const int DefaultPort = 29016;
 	private const string DefaultApiKey = "sbox-ai-2026";
@@ -376,6 +431,8 @@ public static class McpEditorServer
 		RegisterBuiltinTools();
 		McpLogBridge.OnLogMessage -= HandleLogMessage;
 		McpLogBridge.OnLogMessage += HandleLogMessage;
+		McpToolBridge.OnGameEvent -= HandleGameEvent;
+		McpToolBridge.OnGameEvent += HandleGameEvent;
 		McpToolBridge.OnToolsChanged += () => _ = BroadcastEventAsync( "notifications/tools/list_changed", "{}" );
 		McpToolBridge.OnProgress += ( progress, total, message ) =>
 		{
@@ -396,6 +453,7 @@ public static class McpEditorServer
 	public static void Stop()
 	{
 		McpLogBridge.OnLogMessage -= HandleLogMessage;
+		McpToolBridge.OnGameEvent -= HandleGameEvent;
 		_cts?.Cancel();
 		_statePollCts?.Cancel();
 		try { _listener?.Stop(); } catch { }
@@ -411,6 +469,11 @@ public static class McpEditorServer
 	private static void HandleLogMessage( string level, string source, string message )
 	{
 		_ = BroadcastLogAsync( level, source, message );
+	}
+
+	private static void HandleGameEvent( string eventType, string dataJson )
+	{
+		_ = BroadcastEventAsync( "event", dataJson );
 	}
 
 	private static void RegisterBuiltinTools()
@@ -1150,7 +1213,7 @@ public static class McpEditorServer
 					if ( lp.TryGetProperty( "perPage", out var pp ) ) perPage = Math.Clamp( pp.GetInt32(), 1, 500 );
 				}
 
-				var filtered = allTools.AsEnumerable();
+				var filtered = ApplyFocusFilter( allTools ).AsEnumerable();
 				if ( !string.IsNullOrEmpty( query ) )
 				{
 					var q = query;

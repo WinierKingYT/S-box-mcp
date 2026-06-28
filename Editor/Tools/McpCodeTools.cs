@@ -338,5 +338,158 @@ public sealed class {className} : Component
 			}
 			catch ( Exception e ) { return (object)new { error = e.Message }; }
 		}, runOnMainThread: false );
+
+		McpEditorServer.RegisterToolAsync( "sbox_modify_code_block", "Surgically modify a method or property in a C# script file by locating its signature, counting braces to extract the block, and applying replacements/injections.", async args =>
+		{
+			var path = args.GetProperty( "path" ).GetString()?.Replace( "\\", "/" ) ?? "";
+			var targetSignature = args.GetProperty( "target_signature" ).GetString() ?? "";
+			var replacementCode = args.GetProperty( "replacement_code" ).GetString() ?? "";
+			var mode = args.TryGetProperty( "mode", out var m ) ? m.GetString() ?? "replace_body" : "replace_body";
+
+			if ( path.Contains( ".." ) ) return (object)new { error = "Path traversal not allowed" };
+
+			try
+			{
+				string original = null;
+				string absPath;
+				if ( FileSystem.Mounted.FileExists( path ) )
+				{
+					absPath  = FileSystem.Mounted.GetFullPath( path );
+					original = System.IO.File.ReadAllText( absPath );
+				}
+				else
+				{
+					absPath  = System.IO.Path.Combine( FileSystem.Mounted.GetFullPath( "." ), path.Replace( "/", System.IO.Path.DirectorySeparatorChar.ToString() ) );
+					if ( !System.IO.File.Exists( absPath ) ) return new { error = $"File not found: {path}" };
+					original = System.IO.File.ReadAllText( absPath );
+				}
+
+				int signatureIndex = original.IndexOf( targetSignature );
+				if ( signatureIndex == -1 )
+					return new { error = $"Target signature '{targetSignature}' not found in file.", path };
+
+				bool inString = false;
+				bool inChar = false;
+				bool inVerbatimString = false;
+				bool inLineComment = false;
+				bool inBlockComment = false;
+				int openBraceIndex = original.IndexOf( '{', signatureIndex );
+				if ( openBraceIndex == -1 )
+					return new { error = "Opening brace not found after signature", path };
+
+				int braceCount = 1;
+				int closeBraceIndex = -1;
+				for ( int i = openBraceIndex + 1; i < original.Length; i++ )
+				{
+					char c = original[i];
+					char next = i + 1 < original.Length ? original[i + 1] : '\0';
+
+					if ( inLineComment )
+					{
+						if ( c == '\n' || c == '\r' ) inLineComment = false;
+						continue;
+					}
+					if ( inBlockComment )
+					{
+						if ( c == '*' && next == '/' ) { inBlockComment = false; i++; }
+						continue;
+					}
+					if ( inString )
+					{
+						if ( c == '\\' ) { i++; continue; }
+						if ( c == '"' ) inString = false;
+						continue;
+					}
+					if ( inVerbatimString )
+					{
+						if ( c == '"' && next == '"' ) { i++; continue; }
+						if ( c == '"' ) inVerbatimString = false;
+						continue;
+					}
+					if ( inChar )
+					{
+						if ( c == '\\' ) { i++; continue; }
+						if ( c == '\'' ) inChar = false;
+						continue;
+					}
+
+					if ( c == '/' && next == '/' ) { inLineComment = true; i++; continue; }
+					if ( c == '/' && next == '*' ) { inBlockComment = true; i++; continue; }
+
+					if ( c == '@' && next == '"' ) { inVerbatimString = true; i++; continue; }
+					if ( c == '"' ) { inString = true; continue; }
+					if ( c == '\'' ) { inChar = true; continue; }
+
+					if ( c == '{' ) braceCount++;
+					else if ( c == '}' )
+					{
+						braceCount--;
+						if ( braceCount == 0 )
+						{
+							closeBraceIndex = i;
+							break;
+						}
+					}
+				}
+
+				if ( closeBraceIndex == -1 )
+					return new { error = "Matching closing brace not found", path };
+
+				string patched;
+				if ( mode == "replace_body" )
+				{
+					var before = original.Substring( 0, openBraceIndex + 1 );
+					var after = original.Substring( closeBraceIndex );
+					patched = before + "\n" + replacementCode + "\n" + after;
+				}
+				else if ( mode == "replace_method" )
+				{
+					var before = original.Substring( 0, signatureIndex );
+					var after = original.Substring( closeBraceIndex + 1 );
+					patched = before + replacementCode + after;
+				}
+				else if ( mode == "inject_before" )
+				{
+					var before = original.Substring( 0, openBraceIndex + 1 );
+					var after = original.Substring( openBraceIndex + 1 );
+					patched = before + "\n" + replacementCode + "\n" + after;
+				}
+				else if ( mode == "inject_after" )
+				{
+					var before = original.Substring( 0, closeBraceIndex );
+					var after = original.Substring( closeBraceIndex );
+					patched = before + "\n" + replacementCode + "\n" + after;
+				}
+				else
+				{
+					return new { error = $"Invalid mode '{mode}'. Choose 'replace_body', 'replace_method', 'inject_before', or 'inject_after'." };
+				}
+
+				System.IO.File.WriteAllText( absPath, patched );
+
+				object buildResult;
+				try
+				{
+					var psi = new System.Diagnostics.ProcessStartInfo
+					{
+						FileName        = "dotnet",
+						Arguments       = $"build \"{FileSystem.Mounted.GetFullPath( "." )}\" --no-restore -v quiet",
+						RedirectStandardOutput = true,
+						RedirectStandardError  = true,
+						UseShellExecute = false,
+						CreateNoWindow  = true
+					};
+					using var proc = System.Diagnostics.Process.Start( psi );
+					var stdout = await proc.StandardOutput.ReadToEndAsync();
+					var stderr = await proc.StandardError.ReadToEndAsync();
+					await proc.WaitForExitAsync();
+					buildResult = new { exitCode = proc.ExitCode, output = (stdout + stderr).Trim() };
+				}
+				catch ( Exception be ) { buildResult = new { error = be.Message }; }
+
+				return new { success = true, path, mode, build = buildResult };
+			}
+			catch ( Exception e ) { return (object)new { error = e.Message }; }
+		}, new { type = "object", properties = new { path = new { type = "string", description = "Relative .cs path" }, target_signature = new { type = "string", description = "Exact signature to locate" }, replacement_code = new { type = "string", description = "New code block" }, mode = new { type = "string", description = "Mod mode: replace_body, replace_method, inject_before, inject_after" } }, required = new[] { "path", "target_signature", "replacement_code" } }, annotations: new { destructiveHint = true }, runOnMainThread: false );
 	}
 }
