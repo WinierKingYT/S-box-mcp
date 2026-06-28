@@ -85,27 +85,36 @@ public class ToolRunner
 				paramsElement = doc.RootElement.TryGetProperty( "params", out var pp ) ? pp : default;
 			}
 
-			if ( !_registry.TryGet( toolName, out var mdesc, out var instance ) )
-				return (id, id.MethodNotFound( toolName ));
-
-			var schema = SchemaGenerator.Generate( mdesc );
-			var validationError = Validation.ValidateArguments( paramsElement, schema );
-			if ( validationError != null )
-				return (id, id.InvalidParams( validationError ));
-
-			var args = new List<object>();
-			foreach ( var p in mdesc.Parameters )
-			{
-				args.Add( paramsElement.TryGetProperty( p.Name, out var v )
-					? JsonSerializer.Deserialize( v.GetRawText(), p.ParameterType, JsonRpcExtensions.SerializerOpts )
-					: null );
-			}
-
-			if ( McpScene.Active == null && Game.ActiveScene == null )
-				return (id, id.ConnectionClosed());
-
 			var sw = Stopwatch.StartNew();
-			var res = mdesc.Invoke( instance, args.ToArray() );
+			object res;
+
+			if ( _registry.TryGetStaticInvoker( toolName, out var invoker ) )
+			{
+				res = invoker( paramsElement );
+			}
+			else
+			{
+				if ( !_registry.TryGet( toolName, out var mdesc, out var instance ) )
+					return (id, id.MethodNotFound( toolName ));
+
+				var schema = SchemaGenerator.Generate( mdesc );
+				var validationError = Validation.ValidateArguments( paramsElement, schema );
+				if ( validationError != null )
+					return (id, id.InvalidParams( validationError ));
+
+				var args = new List<object>();
+				foreach ( var p in mdesc.Parameters )
+				{
+					args.Add( paramsElement.TryGetProperty( p.Name, out var v )
+						? JsonSerializer.Deserialize( v.GetRawText(), p.ParameterType, JsonRpcExtensions.SerializerOpts )
+						: null );
+				}
+
+				if ( McpScene.Active == null && Game.ActiveScene == null )
+					return (id, id.ConnectionClosed());
+
+				res = mdesc.Invoke( instance, args.ToArray() );
+			}
 
 		if ( res is Task task )
 		{

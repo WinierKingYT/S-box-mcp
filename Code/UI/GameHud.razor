@@ -1,0 +1,404 @@
+@using Sandbox;
+@using Sandbox.UI;
+@using System;
+@using System.Linq;
+@using Code.Core;
+@using Code.Player;
+@inherits PanelComponent
+
+<root class="hud-root">
+	@* Top Bar: Round Timer & Objectives *@
+	<div class="top-bar">
+		<div class="hud-card timer-card">
+			<div class="label">SÜRE</div>
+			<div class="value">@FormatTime(Manager?.RoundTimeLeft ?? 180f)</div>
+		</div>
+
+		<div class="hud-card list-card @(IsListComplete ? "completed" : "")">
+			<div class="label">ALIŞVERİŞ LİSTESİ</div>
+			<div class="value">
+				@(Manager?.CheckedOutItemsCount ?? 0) / @(Manager?.TargetItemsToCheckout ?? 15)
+				@if ( IsListComplete )
+				{
+					<span class="checkmark"> ✔</span>
+				}
+			</div>
+		</div>
+	</div>
+
+	@* Left Side: Leaderboard Scoreboard *@
+	<div class="leaderboard-panel">
+		<div class="leaderboard-title">LİDERLİK TABLOSU</div>
+		<div class="leaderboard-list">
+			@foreach ( var entry in GetLeaderboard() )
+			{
+				<div class="leaderboard-entry @(entry.IsPlayer ? "player" : "")">
+					<div class="entry-name">@entry.Name</div>
+					<div class="entry-score">$@entry.Money</div>
+				</div>
+			}
+		</div>
+	</div>
+
+	@* Bottom Right: Player Wallet & Cart Capacity *@
+	<div class="player-status-panel">
+		<div class="status-card money-card">
+			<div class="label">KAZANÇ</div>
+			<div class="value green">$@(LocalPlayer?.Money ?? 0)</div>
+		</div>
+
+		@if ( LocalPlayer?.ActiveCart != null )
+		{
+			<div class="status-card cargo-card">
+				<div class="label">SEPET DOLULUK</div>
+				<div class="value">
+					@LocalPlayer.ActiveCart.ItemCount / @LocalPlayer.ActiveCart.MaxItems
+				</div>
+				<div class="progress-bar">
+					<div class="fill" style="width: @(GetCartPercent())%;"></div>
+				</div>
+			</div>
+
+			<div class="status-card nitro-card @(LocalPlayer.ActiveCart.IsOverheated ? "overheated" : "")">
+				<div class="label">NİTRO YAKITI</div>
+				<div class="value @(LocalPlayer.ActiveCart.IsOverheated ? "red-text" : "orange-text")">
+					@if ( LocalPlayer.ActiveCart.IsOverheated )
+					{
+						<span>AŞIRI ISINMA!</span>
+					}
+					else
+					{
+						<span>@((int)LocalPlayer.ActiveCart.NitroFuel)%</span>
+					}
+				</div>
+				<div class="progress-bar">
+					<div class="fill nitro-fill @(LocalPlayer.ActiveCart.IsOverheated ? "overheated-fill" : "")" style="width: @(LocalPlayer.ActiveCart.NitroFuel)%;"></div>
+				</div>
+			</div>
+		}
+	</div>
+
+	@* Game Over Overlay Screen *@
+	@if ( Manager?.IsGameOver ?? false )
+	{
+		<div class="gameover-overlay">
+			<div class="gameover-box">
+				<div class="gameover-title">ROUND BİTTİ!</div>
+				
+				<div class="winner-title">🏆 KAZANAN 🏆</div>
+				<div class="winner-name">@GetWinnerName()</div>
+				<div class="winner-score">$@GetWinnerMoney()</div>
+
+				<div class="restart-prompt">Yeniden başlamak için oyunu sıfırlayın.</div>
+			</div>
+		</div>
+	}
+</root>
+
+<style>
+.hud-root {
+	position: absolute;
+	left: 0;
+	top: 0;
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+	font-family: sans-serif;
+	padding: 24px;
+}
+
+/* Top Bar Styling */
+.top-bar {
+	position: absolute;
+	left: 50%;
+	top: 24px;
+	transform: translateX(-50%);
+	flex-direction: row;
+	gap: 16px;
+}
+
+.hud-card {
+	background-color: rgba(18, 18, 24, 0.85);
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	border-radius: 10px;
+	padding: 8px 20px;
+	flex-direction: column;
+	align-items: center;
+	box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+}
+
+.timer-card {
+	border-color: rgba(255, 120, 0, 0.3);
+}
+
+.list-card.completed {
+	border-color: rgba(0, 255, 100, 0.4);
+	box-shadow: 0 4px 20px rgba(0, 255, 100, 0.2);
+}
+
+.checkmark {
+	color: #00ff66;
+	font-weight: bold;
+}
+
+.label {
+	font-size: 11px;
+	font-weight: 700;
+	color: #a0a0a8;
+	margin-bottom: 2px;
+	letter-spacing: 1px;
+}
+
+.value {
+	font-size: 22px;
+	font-weight: 800;
+	color: #ffffff;
+}
+
+.value.green {
+	color: #00ff66;
+}
+
+/* Leaderboard Panel */
+.leaderboard-panel {
+	position: absolute;
+	left: 24px;
+	top: 24px;
+	width: 220px;
+	background-color: rgba(18, 18, 24, 0.8);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 12px;
+	padding: 16px;
+	flex-direction: column;
+	box-shadow: 0 4px 15px rgba(0, 0, 0, 0.4);
+}
+
+.leaderboard-title {
+	font-size: 13px;
+	font-weight: 800;
+	color: #ff7800;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+	padding-bottom: 8px;
+	margin-bottom: 10px;
+	letter-spacing: 0.5px;
+}
+
+.leaderboard-list {
+	flex-direction: column;
+	gap: 6px;
+}
+
+.leaderboard-entry {
+	flex-direction: row;
+	justify-content: space-between;
+	align-items: center;
+	padding: 4px 8px;
+	border-radius: 4px;
+}
+
+.leaderboard-entry.player {
+	background-color: rgba(0, 128, 255, 0.15);
+	border: 1px solid rgba(0, 128, 255, 0.25);
+}
+
+.entry-name {
+	font-size: 13px;
+	font-weight: 700;
+	color: #e0e0e8;
+}
+
+.leaderboard-entry.player .entry-name {
+	color: #70b0ff;
+}
+
+.entry-score {
+	font-size: 13px;
+	font-weight: 800;
+	color: #ffffff;
+}
+
+/* Bottom Status */
+.player-status-panel {
+	position: absolute;
+	right: 24px;
+	bottom: 24px;
+	flex-direction: column;
+	gap: 12px;
+	width: 220px;
+}
+
+.status-card {
+	background-color: rgba(18, 18, 24, 0.85);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 10px;
+	padding: 12px 16px;
+	flex-direction: column;
+	box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+}
+
+.cargo-card {
+	border-color: rgba(0, 128, 255, 0.3);
+}
+
+.nitro-card {
+	border-color: rgba(255, 120, 0, 0.3);
+}
+
+.nitro-card.overheated {
+	border-color: rgba(230, 48, 48, 0.6);
+	box-shadow: 0 4px 15px rgba(230, 48, 48, 0.2);
+}
+
+.orange-text {
+	color: #ff8800;
+	text-shadow: 0 0 8px rgba(255, 136, 0, 0.3);
+}
+
+.red-text {
+	color: #ff3333;
+	text-shadow: 0 0 10px rgba(255, 51, 51, 0.5);
+}
+
+.nitro-fill {
+	background-color: #ff8800;
+}
+
+.nitro-fill.overheated-fill {
+	background-color: #ff3333;
+}
+
+.progress-bar {
+	margin-top: 6px;
+	height: 6px;
+	background-color: rgba(255, 255, 255, 0.1);
+	border-radius: 3px;
+	overflow: hidden;
+	width: 100%;
+}
+
+.fill {
+	height: 100%;
+	background-color: #3880ff;
+	border-radius: 3px;
+}
+
+/* Game Over Overlay Styling */
+.gameover-overlay {
+	position: absolute;
+	left: 0;
+	top: 0;
+	width: 100%;
+	height: 100%;
+	background-color: rgba(0, 0, 0, 0.75);
+	justify-content: center;
+	align-items: center;
+	z-index: 200;
+}
+
+.gameover-box {
+	background-color: rgba(18, 18, 24, 0.95);
+	border: 3px solid #ff7800;
+	border-radius: 20px;
+	padding: 40px 60px;
+	flex-direction: column;
+	align-items: center;
+	box-shadow: 0px 10px 40px rgba(255, 120, 0, 0.25);
+}
+
+.gameover-title {
+	font-size: 42px;
+	font-weight: 900;
+	color: #e03030;
+	margin-bottom: 24px;
+	text-shadow: 0 0 15px rgba(224, 48, 48, 0.4);
+}
+
+.winner-title {
+	font-size: 16px;
+	font-weight: 700;
+	color: #ff7800;
+	margin-bottom: 4px;
+}
+
+.winner-name {
+	font-size: 32px;
+	font-weight: 800;
+	color: #ffffff;
+	margin-bottom: 8px;
+}
+
+.winner-score {
+	font-size: 28px;
+	font-weight: 800;
+	color: #00ff66;
+	margin-bottom: 24px;
+}
+
+.restart-prompt {
+	font-size: 13px;
+	color: #707078;
+}
+</style>
+
+@code {
+	private GameModeManager Manager => Scene.GetAllComponents<GameModeManager>().FirstOrDefault();
+	private Code.Player.PlayerController LocalPlayer => Scene.GetAllComponents<Code.Player.PlayerController>().FirstOrDefault( p => !p.IsProxy );
+
+	private bool IsListComplete => Manager != null && Manager.CheckedOutItemsCount >= Manager.TargetItemsToCheckout;
+
+	private string FormatTime( float seconds )
+	{
+		int minutes = (int)( seconds / 60f );
+		int secs = (int)( seconds % 60f );
+		return $"{minutes:D2}:{secs:D2}";
+	}
+
+	private float GetCartPercent()
+	{
+		var cart = LocalPlayer?.ActiveCart;
+		if ( cart == null || cart.MaxItems <= 0 ) return 0f;
+		return ( (float)cart.ItemCount / cart.MaxItems ) * 100f;
+	}
+
+	public struct LeaderboardEntry
+	{
+		public string Name;
+		public int Money;
+		public bool IsPlayer;
+	}
+
+	private System.Collections.Generic.List<LeaderboardEntry> GetLeaderboard()
+	{
+		var list = new System.Collections.Generic.List<LeaderboardEntry>();
+
+		// Add Player
+		var player = LocalPlayer;
+		if ( player != null )
+		{
+			list.Add( new LeaderboardEntry { Name = "Oyuncu (Siz)", Money = player.Money, IsPlayer = true } );
+		}
+
+		// Add Bots
+		var bots = Scene.GetAllComponents<ShoppingCartController>().Where( c => c.IsBotDriven ).ToList();
+		foreach ( var bot in bots )
+		{
+			list.Add( new LeaderboardEntry { Name = bot.BotName, Money = bot.BotMoney, IsPlayer = false } );
+		}
+
+		return list.OrderByDescending( e => e.Money ).ToList();
+	}
+
+	private string GetWinnerName()
+	{
+		var lb = GetLeaderboard();
+		if ( lb.Count == 0 ) return "Belirsiz";
+		return lb.First().Name;
+	}
+
+	private int GetWinnerMoney()
+	{
+		var lb = GetLeaderboard();
+		if ( lb.Count == 0 ) return 0;
+		return lb.First().Money;
+	}
+}

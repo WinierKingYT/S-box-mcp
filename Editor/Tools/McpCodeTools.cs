@@ -703,5 +703,53 @@ public static class CodeEvaluator
 				return new { success = false, error = e.Message, stackTrace = e.ToString() };
 			}
 		}, new { type = "object", properties = new { code = new { type = "string", description = "The C# code snippet containing an Evaluator class with static void Run() or raw statements." } }, required = new[] { "code" } } );
+
+		McpEditorServer.RegisterTool( "sbox_query_ast", "Queries C# files using Roslyn AST to retrieve only a specific class or method definition, avoiding full file dumps and saving tokens.", args =>
+		{
+			var path = args.GetProperty( "path" ).GetString() ?? "";
+			var targetName = args.TryGetProperty( "targetName", out var tn ) ? tn.GetString() ?? "" : "";
+			var type = args.TryGetProperty( "type", out var tp ) ? tp.GetString() ?? "method" : "method";
+
+			try
+			{
+				string absPath;
+				if ( FileSystem.Mounted.FileExists( path ) )
+					absPath = FileSystem.Mounted.GetFullPath( path );
+				else
+					absPath = System.IO.Path.Combine( FileSystem.Mounted.GetFullPath( "." ), path.Replace( "/", System.IO.Path.DirectorySeparatorChar.ToString() ) );
+
+				if ( !System.IO.File.Exists( absPath ) )
+					return new { error = $"File not found: {path}" };
+
+				var code = System.IO.File.ReadAllText( absPath );
+				var syntaxTree = CSharpSyntaxTree.ParseText( code );
+				var root = syntaxTree.GetRoot();
+
+				if ( type.Equals( "class", StringComparison.OrdinalIgnoreCase ) )
+				{
+					var cls = root.DescendantNodes().OfType<ClassDeclarationSyntax>()
+						.FirstOrDefault( c => c.Identifier.Text.Equals( targetName, StringComparison.OrdinalIgnoreCase ) );
+					if ( cls != null )
+					{
+						return new { success = true, path, targetName, type, code = cls.ToFullString() };
+					}
+					return new { error = $"Class '{targetName}' not found in {path}" };
+				}
+				else
+				{
+					var method = root.DescendantNodes().OfType<MethodDeclarationSyntax>()
+						.FirstOrDefault( m => m.Identifier.Text.Equals( targetName, StringComparison.OrdinalIgnoreCase ) );
+					if ( method != null )
+					{
+						return new { success = true, path, targetName, type, code = method.ToFullString() };
+					}
+					return new { error = $"Method '{targetName}' not found in {path}" };
+				}
+			}
+			catch ( Exception e )
+			{
+				return new { error = e.Message };
+			}
+		}, new { type = "object", properties = new { path = new { type = "string", description = "Relative .cs path" }, targetName = new { type = "string", description = "Name of class or method to extract" }, type = new { type = "string", description = "Type of node to query: class or method (default method)" } }, required = new[] { "path", "targetName" } } );
 	}
 }

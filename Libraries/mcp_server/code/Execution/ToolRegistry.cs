@@ -12,6 +12,7 @@ public class ToolRegistry
 	private readonly Dictionary<string, MethodDescription> _tools = new();
 	private readonly Dictionary<string, object> _instances = new();
 	private readonly Dictionary<string, string> _toolGroups = new();
+	private readonly Dictionary<string, Func<JsonElement, object>> _staticInvokers = new();
 	private bool _initialized;
 	private readonly object _initLock = new();
 
@@ -26,9 +27,9 @@ public class ToolRegistry
 				RegisterAll();
 				_initialized = true;
 			}
-			catch
+			catch ( Exception e )
 			{
-				Log.Error( "[MCP] Tool Registration Failed" );
+				Log.Error( $"[MCP] Tool Registration Failed: {e.Message}" );
 			}
 		}
 	}
@@ -38,12 +39,60 @@ public class ToolRegistry
 		_tools.Clear();
 		_instances.Clear();
 		_toolGroups.Clear();
+		_staticInvokers.Clear();
+
+		var genType = TypeLibrary.GetType( "McpBridge.Execution.McpGeneratedTools" );
+		if ( genType != null )
+		{
+			try
+			{
+				var toolsField = genType.TargetType.GetField( "Tools", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static );
+				var genTools = toolsField?.GetValue( null ) as System.Collections.IDictionary;
+				if ( genTools != null )
+				{
+					foreach ( System.Collections.DictionaryEntry kv in genTools )
+					{
+						var toolName = (string)kv.Key;
+						var boundTool = kv.Value;
+						if ( boundTool == null ) continue;
+
+						var tType = boundTool.GetType();
+						var desc = (string)tType.GetProperty( "Description" )?.GetValue( boundTool ) ?? "";
+						var group = (string)tType.GetProperty( "Group" )?.GetValue( boundTool ) ?? "";
+						var invokeDelegate = tType.GetProperty( "Invoke" )?.GetValue( boundTool ) as Func<JsonElement, object>;
+
+						if ( invokeDelegate != null )
+						{
+							_staticInvokers[toolName] = invokeDelegate;
+							_toolGroups[toolName] = group;
+
+							var matchedType = TypeLibrary.GetTypesWithAttribute<McpToolGroupAttribute>()
+								.FirstOrDefault( t => t.Type != null && t.Type.Name.StartsWith( group ) );
+							
+							var mdesc = matchedType.Type?.Methods.FirstOrDefault( m => m.GetCustomAttribute<McpToolAttribute>()?.Name == toolName );
+							if ( mdesc != null )
+							{
+								_tools[toolName] = mdesc;
+								McpToolBridge.RegisterGlobalToolName( toolName );
+							}
+						}
+					}
+					Log.Info( $"[MCP] Loaded {_staticInvokers.Count} statically compiled tools." );
+					return;
+				}
+			}
+			catch ( Exception ex )
+			{
+				Log.Warning( $"[MCP] Failed to load statically compiled tools: {ex.Message}. Falling back to reflection." );
+			}
+		}
+
 		var types = TypeLibrary.GetTypesWithAttribute<McpToolGroupAttribute>();
 		foreach ( var entry in types )
 		{
 			try
 			{
-					var groupName = entry.Type.Name;
+				var groupName = entry.Type.Name;
 				if ( groupName.EndsWith( "Tools" ) ) groupName = groupName.Substring( 0, groupName.Length - 5 );
 				object inst = null;
 				if ( !entry.Type.IsAbstract )
@@ -67,7 +116,7 @@ public class ToolRegistry
 				Log.Warning( $"[MCP] Failed to register tool group {entry.Type.Name}" );
 			}
 		}
-		Log.Info( $"[MCP] Registered {_tools.Count} tools" );
+		Log.Info( $"[MCP] Registered {_tools.Count} tools via reflection" );
 	}
 
 	public bool TryGet( string name, out MethodDescription method, out object instance )
@@ -83,9 +132,28 @@ public class ToolRegistry
 		return false;
 	}
 
+	public bool TryGetStaticInvoker( string name, out Func<JsonElement, object> invoker )
+	{
+		return _staticInvokers.TryGetValue( name, out invoker );
+	}
+
 	public object RunSingle( string method, string paramsJson )
 	{
 		EnsureInitialized();
+		
+		if ( _staticInvokers.TryGetValue( method, out var invoker ) )
+		{
+			try
+			{
+				using var doc = JsonDocument.Parse( paramsJson ?? "{}" );
+				return invoker( doc.RootElement );
+			}
+			catch ( Exception ex )
+			{
+				return new { error = $"Static tool execution failed: {ex.Message}" };
+			}
+		}
+
 		if ( !_tools.TryGetValue( method, out var mdesc ) )
 			return new { error = $"Method '{method}' not found" };
 

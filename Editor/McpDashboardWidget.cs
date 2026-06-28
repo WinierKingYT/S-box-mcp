@@ -20,11 +20,21 @@ public class McpDashboardWidget : Widget
 	private Widget _sceneContainer;
 	private Widget _trafficContainer;
 	private Widget _resourceContainer;
+	private Widget _memoryContainer;
+
+	private Widget _memoryListWidget;
+	private Button[] _memoryButtons = new Button[15];
+	private string[] _memoryIds = new string[15];
+	private TextEdit _memoryDetailLabel;
+	private string _selectedMemoryId = "";
+	private Button _deleteMemoryBtn;
+	private Button _clearAllMemoriesBtn;
 
 	// ── Status Page ───────────────────────────────────────────────────────
 	private Label _statusLabel;
 	private Label _sessionCountLabel;
 	private Label _sessionsListLabel;
+	private TextEdit _liveTerminalLabel;
 	private LineEdit _portEdit;
 	private LineEdit _apiKeyEdit;
 	private Button _startBtn;
@@ -94,6 +104,7 @@ public class McpDashboardWidget : Widget
 		AddTab( "Logs",      3 );
 		AddTab( "Traffic",   4 );
 		AddTab( "Resources", 5 );
+		AddTab( "Memory",    6 );
 		Layout.Add( tabStrip );
 
 		// ── Create Containers ────────────────────────────────────────────
@@ -112,6 +123,7 @@ public class McpDashboardWidget : Widget
 		_logsContainer     = MakeContainer();
 		_trafficContainer  = MakeContainer();
 		_resourceContainer = MakeContainer();
+		_memoryContainer   = MakeContainer();
 
 		// ════════════════════════════════════════════════════════════════
 		// SEKME 0 — Status & Config
@@ -152,6 +164,13 @@ public class McpDashboardWidget : Widget
 		_statusContainer.Layout.Add( new Label( "Active Sessions:", _statusContainer ) );
 		_sessionsListLabel = new Label( "(No active connections)", _statusContainer );
 		_statusContainer.Layout.Add( _sessionsListLabel );
+
+		_statusContainer.Layout.Add( new Label( "Live MCP Activity Log:", _statusContainer ) );
+		_liveTerminalLabel = new TextEdit( _statusContainer );
+		_liveTerminalLabel.ReadOnly = true;
+		_liveTerminalLabel.FixedHeight = 120;
+		_liveTerminalLabel.PlainText = "Live server activity will display here...";
+		_statusContainer.Layout.Add( _liveTerminalLabel );
 
 		// ════════════════════════════════════════════════════════════════
 		// SEKME 1 — Playground
@@ -222,6 +241,41 @@ public class McpDashboardWidget : Widget
 
 		_selectedObjLabel = new Label( "No GameObject selected. Search and select above.", _sceneContainer );
 		_sceneContainer.Layout.Add( _selectedObjLabel );
+
+		// ════════════════════════════════════════════════════════════════
+		// Zaman Makinesi (Geri Sarma)
+		// ════════════════════════════════════════════════════════════════
+		_sceneContainer.Layout.Add( new Label( "Zaman Makinesi (Geri Sarma Slider'ı)", _sceneContainer ) );
+		var timeTravelRow = Editor.Layout.Row();
+		timeTravelRow.Spacing = 8;
+		
+		var sliderLabel = new Label( "0 saniye geriye sar", _sceneContainer );
+		var slider = new FloatSlider( _sceneContainer );
+		slider.Minimum = 0f;
+		slider.Maximum = 60f;
+		slider.Value = 0f;
+		slider.Step = 1f;
+		
+		slider.OnValueEdited += () =>
+		{
+			sliderLabel.Text = $"{Math.Round(slider.Value)} saniye geriye sar";
+		};
+
+		slider.EditingFinished += () =>
+		{
+			var seconds = slider.Value;
+			if ( seconds > 0f )
+			{
+				McpBridge.McpStateTimeTravel.Rewind( seconds );
+				Log.Info( $"[MCP] Slider Zaman Yolculuğu: {seconds} saniye geriye sarıldı." );
+				slider.Value = 0f;
+				sliderLabel.Text = "0 saniye geriye sar";
+			}
+		};
+
+		timeTravelRow.Add( sliderLabel );
+		timeTravelRow.Add( slider );
+		_sceneContainer.Layout.Add( timeTravelRow );
 
 		// ════════════════════════════════════════════════════════════════
 		// SEKME 3 — Logs with Filter Buttons
@@ -327,6 +381,64 @@ public class McpDashboardWidget : Widget
 		_resourceContentLabel.ReadOnly = true;
 		_resourceContainer.Layout.Add( _resourceContentLabel );
 
+		// ════════════════════════════════════════════════════════════════
+		// SEKME 6 — Memory Store Explorer (dx memory management)
+		// ════════════════════════════════════════════════════════════════
+		_memoryContainer.Layout.Add( new Label( "Epizodik Hafıza Yönetimi (Pattern & Antipattern)", _memoryContainer ) );
+
+		var memoryCtrlRow = Editor.Layout.Row();
+		memoryCtrlRow.Spacing = 4;
+		
+		var memRefreshBtn = new Button( "Refresh List", _memoryContainer );
+		memRefreshBtn.Clicked += () => RefreshMemoryList();
+		memoryCtrlRow.Add( memRefreshBtn );
+
+		_clearAllMemoriesBtn = new Button( "Clear All Memories", _memoryContainer );
+		_clearAllMemoriesBtn.Clicked += () =>
+		{
+			McpBridge.MemoryStore.Clear();
+			_selectedMemoryId = "";
+			_memoryDetailLabel.PlainText = "Hafıza temizlendi.";
+			RefreshMemoryList();
+		};
+		memoryCtrlRow.Add( _clearAllMemoriesBtn );
+
+		_deleteMemoryBtn = new Button( "Delete Selected", _memoryContainer );
+		_deleteMemoryBtn.Clicked += () =>
+		{
+			if ( !string.IsNullOrEmpty( _selectedMemoryId ) )
+			{
+				McpBridge.MemoryStore.Remove( _selectedMemoryId );
+				_selectedMemoryId = "";
+				_memoryDetailLabel.PlainText = "Hafıza silindi.";
+				RefreshMemoryList();
+			}
+		};
+		memoryCtrlRow.Add( _deleteMemoryBtn );
+
+		_memoryContainer.Layout.Add( memoryCtrlRow );
+
+		_memoryListWidget = new Widget( _memoryContainer );
+		var memListLayout = Editor.Layout.Column();
+		memListLayout.Spacing = 2;
+		_memoryListWidget.Layout = memListLayout;
+
+		for ( int i = 0; i < 15; i++ )
+		{
+			int idx = i;
+			_memoryButtons[i] = new Button( "", _memoryListWidget );
+			_memoryButtons[i].Clicked += () => OnMemoryButtonClicked( idx );
+			_memoryButtons[i].Hide();
+			memListLayout.Add( _memoryButtons[i] );
+		}
+		_memoryContainer.Layout.Add( _memoryListWidget );
+
+		_memoryContainer.Layout.Add( new Label( "Hafıza Detayı ve Kod İçeriği:", _memoryContainer ) );
+		_memoryDetailLabel = new TextEdit( _memoryContainer );
+		_memoryDetailLabel.ReadOnly = true;
+		_memoryDetailLabel.PlainText = "Seçilen hafızanın detayları...";
+		_memoryContainer.Layout.Add( _memoryDetailLabel );
+
 		// ── Init ─────────────────────────────────────────────────────────
 		var config = McpBridge.McpConfig.Load();
 		_portEdit.Text   = config.Port.ToString();
@@ -346,6 +458,7 @@ public class McpDashboardWidget : Widget
 		_logsContainer.Hide();
 		_trafficContainer.Hide();
 		_resourceContainer.Hide();
+		_memoryContainer.Hide();
 
 		switch ( index )
 		{
@@ -355,6 +468,7 @@ public class McpDashboardWidget : Widget
 			case 3: _logsContainer.Show();                                break;
 			case 4: _trafficContainer.Show(); RefreshTrafficList();       break;
 			case 5: _resourceContainer.Show();                            break;
+			case 6: _memoryContainer.Show(); RefreshMemoryList();         break;
 		}
 	}
 
@@ -525,6 +639,54 @@ public class McpDashboardWidget : Widget
 		catch { return raw; }
 	}
 
+	// ── Memory Explorer Handlers ──────────────────────────────────────────
+	private List<McpBridge.MemoryEntry> _lastMemoryEntries = new();
+
+	private void RefreshMemoryList()
+	{
+		try
+		{
+			_lastMemoryEntries = McpBridge.MemoryStore.Search( "", null, 15 );
+			
+			for ( int i = 0; i < 15; i++ )
+			{
+				if ( i < _lastMemoryEntries.Count )
+				{
+					var entry = _lastMemoryEntries[i];
+					_memoryIds[i] = entry.Id;
+					_memoryButtons[i].Text = $"[{entry.Type.ToUpper()}] {System.IO.Path.GetFileName(entry.Path)}";
+					_memoryButtons[i].Show();
+				}
+				else
+				{
+					_memoryIds[i] = null;
+					_memoryButtons[i].Hide();
+				}
+			}
+		}
+		catch ( Exception ex )
+		{
+			_memoryDetailLabel.PlainText = $"Error refreshing memory list: {ex.Message}";
+		}
+	}
+
+	private void OnMemoryButtonClicked( int index )
+	{
+		if ( index < 0 || index >= _lastMemoryEntries.Count ) return;
+		var entry = _lastMemoryEntries[index];
+		_selectedMemoryId = entry.Id;
+
+		var typeStr = entry.Type.ToUpper();
+		_memoryDetailLabel.PlainText = $"ID: {entry.Id}\n" +
+			$"Type: {typeStr}\n" +
+			$"Path: {entry.Path}\n" +
+			$"Context: {entry.Context}\n" +
+			$"Description: {entry.Description}\n" +
+			$"Timestamp: {entry.Timestamp.ToLocalTime()}\n" +
+			$"------------------------------------------------\n" +
+			$"Code Snippet:\n{entry.CodeSnippet}";
+	}
+
 	// ── Resource Explorer Handlers ────────────────────────────────────────
 	private string _selectedResourceUri = "";
 
@@ -618,6 +780,11 @@ public class McpDashboardWidget : Widget
 			_sessionCountLabel.Text = $"Active Connections: {McpEditorServer.SessionCount}";
 			var sessions = McpEditorServer.ActiveSessions.ToList();
 			_sessionsListLabel.Text = sessions.Count > 0 ? string.Join( "\n", sessions ) : "(No active connections)";
+
+			var liveLogs = McpEditorServer.GetServerLogs().ToList();
+			_liveTerminalLabel.PlainText = liveLogs.Count > 0
+				? string.Join( "\n", liveLogs.TakeLast( 6 ) )
+				: "Waiting for server activity...";
 		}
 
 		if ( _logsContainer.Visible )

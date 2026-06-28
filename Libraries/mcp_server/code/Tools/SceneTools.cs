@@ -633,6 +633,67 @@ public class SceneTools
 		}
 	}
 
+	[McpTool("sbox_physics_raycast", "Performs a raycast in the physics world and returns hit details.", OptionalParams = new[]{"dirX", "dirY", "dirZ"}, ReadOnlyHint = true)]
+	public object PhysicsRaycast( float originX, float originY, float originZ, float dirX = 0f, float dirY = 0f, float dirZ = -1f )
+	{
+		var scene = Game.ActiveScene;
+		if ( scene == null ) return new { error = "No active scene" };
+
+		try
+		{
+			var origin = new Vector3( originX, originY, originZ );
+			var direction = new Vector3( dirX, dirY, dirZ ).Normal;
+			var tr = scene.Trace.Ray( origin, origin + direction * 10000f ).Run();
+
+			return new
+			{
+				hit = tr.Hit,
+				distance = tr.Distance,
+				endPosition = new { x = tr.EndPosition.x, y = tr.EndPosition.y, z = tr.EndPosition.z },
+				gameObject = tr.GameObject.IsValid() ? new { name = tr.GameObject.Name, id = tr.GameObject.Id.ToString() } : null
+			};
+		}
+		catch ( Exception e )
+		{
+			return new { error = e.Message };
+		}
+	}
+
+	[McpTool("sbox_get_entity_metrics", "Gathers memory and execution metrics for active scene entities to detect performance leaks.", ReadOnlyHint = true)]
+	public object GetEntityMetrics()
+	{
+		var scene = Game.ActiveScene;
+		if ( scene == null ) return new { error = "No active scene" };
+
+		try
+		{
+			var objects = scene.GetAllObjects( true ).ToList();
+			var components = scene.GetAllComponents<Component>().ToList();
+			var pedCount = components.Count( c => c.GetType().Name.Equals( "Pedestrian", StringComparison.OrdinalIgnoreCase ) );
+			var cartCount = components.Count( c => c.GetType().Name.Contains( "Cart", StringComparison.OrdinalIgnoreCase ) );
+
+			return new
+			{
+				success = true,
+				stats = new
+				{
+					gameObjectCount = objects.Count,
+					componentCount = components.Count,
+					pedestrians = pedCount,
+					carts = cartCount,
+					totalMemoryMb = Math.Round( GC.GetTotalMemory( false ) / (1024f * 1024f), 2 ),
+					gcCollectionsGen0 = GC.CollectionCount( 0 ),
+					gcCollectionsGen1 = GC.CollectionCount( 1 ),
+					gcCollectionsGen2 = GC.CollectionCount( 2 )
+				}
+			};
+		}
+		catch ( Exception e )
+		{
+			return new { error = e.Message };
+		}
+	}
+
 	private static DirectionalLight FindDirectionalLight( Scene scene, string lightGuid = null )
 	{
 		if ( lightGuid != null && Guid.TryParse( lightGuid, out var guid ) ) { var go = scene.Directory.FindByGuid( guid ); if ( go.IsValid() ) return go.Components.Get<DirectionalLight>(); }

@@ -15,10 +15,20 @@ public class StateSnapshot
 
 public static class McpStateTimeTravel
 {
-	private static readonly Queue<StateSnapshot> _buffer = new();
 	private static readonly int MaxSnapshots = 60;
+	private static readonly StateSnapshot[] _snapshots = new StateSnapshot[60];
+	private static int _writeIndex = 0;
+	private static int _snapshotCount = 0;
 	private static DateTime _lastCaptureTime = DateTime.MinValue;
 	private static readonly Dictionary<string, System.Reflection.PropertyInfo> _propertyCache = new();
+
+	static McpStateTimeTravel()
+	{
+		for ( int i = 0; i < MaxSnapshots; i++ )
+		{
+			_snapshots[i] = new StateSnapshot();
+		}
+	}
 
 	private static System.Reflection.PropertyInfo GetCachedProperty( Type type, string propName )
 	{
@@ -45,7 +55,14 @@ public static class McpStateTimeTravel
 		var scene = Game.ActiveScene;
 		if ( scene == null ) return;
 
-		var snap = new StateSnapshot();
+		// Select the next pre-allocated snapshot in the ring buffer
+		var snap = _snapshots[_writeIndex];
+
+		// Clear internal dictionaries to reuse their memory buffers without GC allocation
+		snap.Timestamp = DateTime.UtcNow;
+		snap.ObjectPositions.Clear();
+		snap.ObjectRotations.Clear();
+		snap.GameVariables.Clear();
 
 		foreach ( var go in scene.GetAllObjects( true ) )
 		{
@@ -73,11 +90,9 @@ public static class McpStateTimeTravel
 			snap.GameVariables["QuotaManager_Collected"] = GetCachedProperty( t, "Collected" )?.GetValue( qm );
 		}
 
-		_buffer.Enqueue( snap );
-		if ( _buffer.Count > MaxSnapshots )
-		{
-			_buffer.Dequeue();
-		}
+		// Advance ring buffer write head
+		_writeIndex = (_writeIndex + 1) % MaxSnapshots;
+		_snapshotCount = Math.Min( _snapshotCount + 1, MaxSnapshots );
 	}
 
 	public static object Rewind( float secondsAgo )
@@ -85,15 +100,17 @@ public static class McpStateTimeTravel
 		var scene = Game.ActiveScene;
 		if ( scene == null ) return new { error = "No active scene" };
 
-		if ( _buffer.Count == 0 )
+		if ( _snapshotCount == 0 )
 			return new { error = "No time travel snapshots recorded yet" };
 
 		var targetTime = DateTime.UtcNow - TimeSpan.FromSeconds( secondsAgo );
 		
 		StateSnapshot closest = null;
 		double minDiff = double.MaxValue;
-		foreach ( var snap in _buffer )
+		
+		for ( int i = 0; i < _snapshotCount; i++ )
 		{
+			var snap = _snapshots[i];
 			double diff = Math.Abs( (snap.Timestamp - targetTime).TotalMilliseconds );
 			if ( diff < minDiff )
 			{

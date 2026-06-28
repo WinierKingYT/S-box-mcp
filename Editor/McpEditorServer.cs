@@ -416,6 +416,7 @@ public static class McpEditorServer
 
 	public static void Start( int? port = null, string apiKey = null )
 	{
+		SchemaCompiler.Compile();
 		Stop();
 		try
 		{

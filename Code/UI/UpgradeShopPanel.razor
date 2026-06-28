@@ -1,0 +1,331 @@
+@using Sandbox;
+@using Sandbox.UI;
+@using System.Linq;
+@using Code.Player;
+@inherits PanelComponent
+
+@if ( !IsActive ) return;
+
+<root class="shop-panel">
+	<div class="header">
+		<div class="title">MARKET MAĞAZASI</div>
+		<div class="money">Bakiye: $@(LocalPlayer?.Money ?? 0)</div>
+	</div>
+
+	<div class="upgrade-list">
+		<div class="upgrade-card">
+			<div class="card-info">
+				<div class="upgrade-title">Motor Gücü (Hız & İvme)</div>
+				<div class="upgrade-desc">Sepetin ivmesini ve maksimum hız sınırını artırır.</div>
+				<div class="upgrade-level">Seviye: @(LocalPlayer?.EngineLevel ?? 1) / 5</div>
+			</div>
+			<div class="card-action">
+				@if ( (LocalPlayer?.EngineLevel ?? 1) >= 5 )
+				{
+					<div class="btn maxed">MAXED</div>
+				}
+				else
+				{
+					<div class="btn" onclick="@(() => BuyUpgrade("engine"))">Geliştir ($@GetCost(LocalPlayer?.EngineLevel ?? 1))</div>
+				}
+			</div>
+		</div>
+
+		<div class="upgrade-card">
+			<div class="card-info">
+				<div class="upgrade-title">Amortisör (Denge & Taşıma)</div>
+				<div class="upgrade-desc">Sepet çökmesini azaltır, viraj yatış dengesini artırır.</div>
+				<div class="upgrade-level">Seviye: @(LocalPlayer?.SuspensionLevel ?? 1) / 5</div>
+			</div>
+			<div class="card-action">
+				@if ( (LocalPlayer?.SuspensionLevel ?? 1) >= 5 )
+				{
+					<div class="btn maxed">MAXED</div>
+				}
+				else
+				{
+					<div class="btn" onclick="@(() => BuyUpgrade("suspension"))">Geliştir ($@GetCost(LocalPlayer?.SuspensionLevel ?? 1))</div>
+				}
+			</div>
+		</div>
+
+		<div class="upgrade-card">
+			<div class="card-info">
+				<div class="upgrade-title">Sepet Kapasitesi (Maksimum Kargo)</div>
+				<div class="upgrade-desc">Sepetin alabileceği maksimum ürün limitini artırır.</div>
+				<div class="upgrade-level">Seviye: @(LocalPlayer?.CapacityLevel ?? 1) / 5</div>
+			</div>
+			<div class="card-action">
+				@if ( (LocalPlayer?.CapacityLevel ?? 1) >= 5 )
+				{
+					<div class="btn maxed">MAXED</div>
+				}
+				else
+				{
+					<div class="btn" onclick="@(() => BuyUpgrade("capacity"))">Geliştir ($@GetCost(LocalPlayer?.CapacityLevel ?? 1))</div>
+				}
+			</div>
+		</div>
+
+		<div class="upgrade-card">
+			<div class="card-info">
+				<div class="upgrade-title">Tekerlek Dayanıklılığı (Yol Tutuş)</div>
+				<div class="upgrade-desc">Kazalarda tekerlek hasarını azaltır, kaymayı önler.</div>
+				<div class="upgrade-level">Seviye: @(LocalPlayer?.DurabilityLevel ?? 1) / 5</div>
+			</div>
+			<div class="card-action">
+				@if ( (LocalPlayer?.DurabilityLevel ?? 1) >= 5 )
+				{
+					<div class="btn maxed">MAXED</div>
+				}
+				else
+				{
+					<div class="btn" onclick="@(() => BuyUpgrade("durability"))">Geliştir ($@GetCost(LocalPlayer?.DurabilityLevel ?? 1))</div>
+				}
+			</div>
+		</div>
+
+		<div class="upgrade-card">
+			<div class="card-info">
+				<div class="upgrade-title">Nitro Kapasitesi (Yakıt Deposu)</div>
+				<div class="upgrade-desc">Maksimum nitro miktarını artırır ve tüketim hızını azaltır.</div>
+				<div class="upgrade-level">Seviye: @(LocalPlayer?.NitroLevel ?? 1) / 5</div>
+			</div>
+			<div class="card-action">
+				@if ( (LocalPlayer?.NitroLevel ?? 1) >= 5 )
+				{
+					<div class="btn maxed">MAXED</div>
+				}
+				else
+				{
+					<div class="btn" onclick="@(() => BuyUpgrade("nitro"))">Geliştir ($@GetCost(LocalPlayer?.NitroLevel ?? 1))</div>
+				}
+			</div>
+		</div>
+	</div>
+
+	<div class="footer">
+		<div class="btn close-btn" onclick="@CloseShop">KAPAT</div>
+	</div>
+</root>
+
+<style>
+.shop-panel {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	width: 600px;
+	height: 620px;
+	background-color: rgba(18, 18, 24, 0.95);
+	border: 2px solid rgba(255, 120, 0, 0.4);
+	border-radius: 16px;
+	box-shadow: 0px 10px 40px rgba(0, 0, 0, 0.85);
+	flex-direction: column;
+	padding: 24px;
+	pointer-events: all;
+	font-family: sans-serif;
+	z-index: 100;
+}
+
+.header {
+	flex-direction: row;
+	justify-content: space-between;
+	align-items: center;
+	border-bottom: 2px solid rgba(255, 255, 255, 0.08);
+	padding-bottom: 16px;
+	margin-bottom: 16px;
+}
+
+.title {
+	font-size: 26px;
+	font-weight: 800;
+	color: #ff7800;
+	text-shadow: 0 0 10px rgba(255, 120, 0, 0.3);
+}
+
+.money {
+	font-size: 20px;
+	font-weight: 700;
+	color: #00ff66;
+}
+
+.upgrade-list {
+	flex-direction: column;
+	flex-grow: 1;
+	gap: 12px;
+	overflow-y: scroll;
+	padding-right: 4px;
+}
+
+.upgrade-card {
+	flex-direction: row;
+	background-color: rgba(255, 255, 255, 0.03);
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	border-radius: 10px;
+	padding: 12px 16px;
+	justify-content: space-between;
+	align-items: center;
+}
+
+.upgrade-card:hover {
+	background-color: rgba(255, 255, 255, 0.06);
+	border-color: rgba(255, 120, 0, 0.2);
+}
+
+.card-info {
+	flex-direction: column;
+	flex-grow: 1;
+	max-width: 400px;
+}
+
+.upgrade-title {
+	font-size: 16px;
+	font-weight: 700;
+	color: #ffffff;
+	margin-bottom: 2px;
+}
+
+.upgrade-desc {
+	font-size: 12px;
+	color: #a0a0a8;
+	margin-bottom: 4px;
+}
+
+.upgrade-level {
+	font-size: 13px;
+	font-weight: 600;
+	color: #3880ff;
+}
+
+.card-action {
+	flex-direction: column;
+	justify-content: center;
+}
+
+.btn {
+	background-color: #ff7800;
+	color: white;
+	font-size: 14px;
+	font-weight: 700;
+	border-radius: 6px;
+	padding: 8px 16px;
+	text-align: center;
+	cursor: pointer;
+}
+
+.btn:hover {
+	background-color: #ff9030;
+	transform: scale(1.05);
+	box-shadow: 0 0 10px rgba(255, 120, 0, 0.4);
+}
+
+.btn.maxed {
+	background-color: rgba(255, 255, 255, 0.1);
+	color: #606068;
+	cursor: default;
+}
+
+.btn.maxed:hover {
+	background-color: rgba(255, 255, 255, 0.1);
+	transform: none;
+	box-shadow: none;
+}
+
+.footer {
+	margin-top: 16px;
+	border-top: 2px solid rgba(255, 255, 255, 0.08);
+	padding-top: 16px;
+	justify-content: center;
+}
+
+.close-btn {
+	background-color: #e03030;
+	width: 120px;
+}
+
+.close-btn:hover {
+	background-color: #f04545;
+	box-shadow: 0 0 10px rgba(224, 48, 48, 0.4);
+}
+</style>
+
+@code {
+	[Property] public bool IsActive { get; set; }
+
+	private Code.Player.PlayerController LocalPlayer => Scene.GetAllComponents<Code.Player.PlayerController>().FirstOrDefault( p => !p.IsProxy );
+
+	protected override void OnUpdate()
+	{
+		if ( !IsActive ) return;
+
+		// Close on Escape Menu key
+		if ( Input.Pressed( "menu" ) )
+		{
+			CloseShop();
+		}
+	}
+
+	private int GetCost( int currentLevel )
+	{
+		return currentLevel switch
+		{
+			1 => 100,
+			2 => 250,
+			3 => 500,
+			4 => 1000,
+			_ => 0
+		};
+	}
+
+	private void BuyUpgrade( string type )
+	{
+		var player = LocalPlayer;
+		if ( player == null ) return;
+
+		int level = type switch
+		{
+			"engine" => player.EngineLevel,
+			"suspension" => player.SuspensionLevel,
+			"capacity" => player.CapacityLevel,
+			"durability" => player.DurabilityLevel,
+			"nitro" => player.NitroLevel,
+			_ => 1
+		};
+
+		if ( level >= 5 ) return;
+
+		int cost = GetCost( level );
+		if ( player.Money >= cost )
+		{
+			player.Money -= cost;
+			
+			if ( type == "engine" ) player.EngineLevel++;
+			else if ( type == "suspension" ) player.SuspensionLevel++;
+			else if ( type == "capacity" ) player.CapacityLevel++;
+			else if ( type == "durability" ) player.DurabilityLevel++;
+			else if ( type == "nitro" ) player.NitroLevel++;
+
+			// Refresh active cart if player is currently driving it
+			if ( player.ActiveCart != null )
+			{
+				player.ApplyUpgradesToCart( player.ActiveCart );
+			}
+
+			// Play confirmation click sound
+			Sound.Play( "sounds/physics/metal/metal_box_impact_soft.sound", player.WorldPosition );
+		}
+	}
+
+	private void CloseShop()
+	{
+		IsActive = false;
+		Mouse.Visibility = MouseVisibility.Hidden;
+		
+		var player = LocalPlayer;
+		if ( player != null )
+		{
+			player.IsShopOpen = false;
+		}
+	}
+}

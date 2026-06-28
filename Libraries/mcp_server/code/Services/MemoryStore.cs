@@ -155,4 +155,13 @@ public static class MemoryStore
 			}
 		}
 	}
+
+	public static void Remove( string id )
+	{
+		lock ( _lock )
+		{
+			_entries.RemoveAll( e => e.Id == id );
+			Save();
+		}
+	}
 }

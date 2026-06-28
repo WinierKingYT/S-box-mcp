@@ -738,5 +738,79 @@ internal static class McpSceneTools
 			}
 			catch ( Exception e ) { return new { error = e.Message }; }
 		}, new { type = "object", properties = new { path = new { type = "string", description = "Path to save .sbox scene file (e.g. scenes/my_scene.sbox)" } }, required = new[] { "path" } }, annotations: new { destructiveHint = true }, runOnMainThread: true );
+
+		McpEditorServer.RegisterToolAsync( "sbox_take_screenshot", "Capture a screenshot of the running game or active scene view.", async args =>
+		{
+			try
+			{
+				var tConsole = TypeLibrary.GetType( "Sandbox.ConsoleSystem" ) ?? TypeLibrary.GetType( "Sandbox.Editor.Console" );
+				if ( tConsole == null ) return new { error = "Console system type not found" };
+
+				var runMethod = tConsole.Methods.FirstOrDefault( m => m.Name == "Run" && m.Parameters.Length == 1 && m.Parameters[0].ParameterType == typeof( string ) );
+				if ( runMethod == null ) return new { error = "ConsoleSystem.Run(string) method not found" };
+
+				// Find sbox screenshots directory
+				var sboxExePath = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
+				var sboxDir = System.IO.Path.GetDirectoryName( sboxExePath );
+				if ( sboxDir.EndsWith( "win64", StringComparison.OrdinalIgnoreCase ) )
+				{
+					sboxDir = System.IO.Path.GetDirectoryName( System.IO.Path.GetDirectoryName( sboxDir ) ); // bin/ -> sbox/
+				}
+				var screenshotsDir = System.IO.Path.Combine( sboxDir, "screenshots" );
+
+				// Get existing files to identify the new one
+				var beforeFiles = System.IO.Directory.Exists( screenshotsDir ) 
+					? System.IO.Directory.GetFiles( screenshotsDir, "*.png" ) 
+					: Array.Empty<string>();
+
+				// Trigger screenshot
+				runMethod.Invoke( null, new object[] { "screenshot" } );
+
+				// Wait up to 1.5 seconds for the screenshot to save
+				string latestFile = null;
+				for ( int i = 0; i < 15; i++ )
+				{
+					await Task.Delay( 100 );
+					if ( !System.IO.Directory.Exists( screenshotsDir ) ) continue;
+
+					var currentFiles = System.IO.Directory.GetFiles( screenshotsDir, "*.png" );
+					var newFiles = currentFiles.Except( beforeFiles ).ToList();
+					if ( newFiles.Count > 0 )
+					{
+						latestFile = newFiles.OrderByDescending( System.IO.File.GetLastWriteTime ).First();
+						break;
+					}
+				}
+
+				if ( string.IsNullOrEmpty( latestFile ) && System.IO.Directory.Exists( screenshotsDir ) )
+				{
+					var allFiles = System.IO.Directory.GetFiles( screenshotsDir, "*.png" );
+					if ( allFiles.Length > 0 )
+					{
+						latestFile = allFiles.OrderByDescending( System.IO.File.GetLastWriteTime ).First();
+					}
+				}
+
+				if ( string.IsNullOrEmpty( latestFile ) || !System.IO.File.Exists( latestFile ) )
+				{
+					return new { error = "Failed to capture or find screenshot file in " + screenshotsDir };
+				}
+
+				var bytes = System.IO.File.ReadAllBytes( latestFile );
+				var b64 = Convert.ToBase64String( bytes );
+				var mime = "image/png";
+
+				return new 
+				{ 
+					success = true, 
+					filePath = latestFile.Replace( '\\', '/' ), 
+					image = $"data:{mime};base64,{b64}" 
+				};
+			}
+			catch ( Exception e )
+			{
+				return new { error = $"Failed to take screenshot: {e.Message}" };
+			}
+		}, new { type = "object", properties = new { }, required = Array.Empty<string>() }, annotations: new { destructiveHint = false }, runOnMainThread: true );
 	}
 }
