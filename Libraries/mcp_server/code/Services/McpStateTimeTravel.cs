@@ -18,6 +18,18 @@ public static class McpStateTimeTravel
 	private static readonly Queue<StateSnapshot> _buffer = new();
 	private static readonly int MaxSnapshots = 60;
 	private static DateTime _lastCaptureTime = DateTime.MinValue;
+	private static readonly Dictionary<string, System.Reflection.PropertyInfo> _propertyCache = new();
+
+	private static System.Reflection.PropertyInfo GetCachedProperty( Type type, string propName )
+	{
+		var key = $"{type.FullName}_{propName}";
+		if ( !_propertyCache.TryGetValue( key, out var prop ) )
+		{
+			prop = type.GetProperty( propName );
+			_propertyCache[key] = prop;
+		}
+		return prop;
+	}
 
 	public static void Tick()
 	{
@@ -49,16 +61,16 @@ public static class McpStateTimeTravel
 		if ( gm != null )
 		{
 			var t = gm.GetType();
-			snap.GameVariables["GameManager_Cash"] = t.GetProperty( "Cash" )?.GetValue( gm );
-			snap.GameVariables["GameManager_Phase"] = t.GetProperty( "Phase" )?.GetValue( gm );
+			snap.GameVariables["GameManager_Cash"] = GetCachedProperty( t, "Cash" )?.GetValue( gm );
+			snap.GameVariables["GameManager_Phase"] = GetCachedProperty( t, "Phase" )?.GetValue( gm );
 		}
 
 		var qm = GetDynamicComponent( "QuotaManager" );
 		if ( qm != null )
 		{
 			var t = qm.GetType();
-			snap.GameVariables["QuotaManager_CurrentQuota"] = t.GetProperty( "CurrentQuota" )?.GetValue( qm );
-			snap.GameVariables["QuotaManager_Collected"] = t.GetProperty( "Collected" )?.GetValue( qm );
+			snap.GameVariables["QuotaManager_CurrentQuota"] = GetCachedProperty( t, "CurrentQuota" )?.GetValue( qm );
+			snap.GameVariables["QuotaManager_Collected"] = GetCachedProperty( t, "Collected" )?.GetValue( qm );
 		}
 
 		_buffer.Enqueue( snap );
@@ -117,7 +129,7 @@ public static class McpStateTimeTravel
 				if ( gm != null )
 				{
 					var propName = kv.Key.Substring( 12 );
-					gm.GetType().GetProperty( propName )?.SetValue( gm, kv.Value );
+					GetCachedProperty( gm.GetType(), propName )?.SetValue( gm, kv.Value );
 					variablesRestored++;
 				}
 			}
@@ -127,7 +139,7 @@ public static class McpStateTimeTravel
 				if ( qm != null )
 				{
 					var propName = kv.Key.Substring( 13 );
-					qm.GetType().GetProperty( propName )?.SetValue( qm, kv.Value );
+					GetCachedProperty( qm.GetType(), propName )?.SetValue( qm, kv.Value );
 					variablesRestored++;
 				}
 			}
