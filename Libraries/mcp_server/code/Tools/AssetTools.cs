@@ -66,11 +66,29 @@ public class AssetTools
 		}
 	}
 
-	[McpTool("sbox_asset_load_prefab", "Spawns a prefab file into the scene at a position.", OptionalParams = new[]{"x", "y", "z"}, DestructiveHint = true)]
-	public object LoadPrefab( string prefabPath, float x = 0, float y = 0, float z = 0 )
+	[McpTool("sbox_asset_load_prefab", "Spawns a prefab file into the scene at a position.", OptionalParams = new[]{"x", "y", "z", "useQueue"}, DestructiveHint = true)]
+	public object LoadPrefab( string prefabPath, float x = 0, float y = 0, float z = 0, bool useQueue = false )
 	{
 		try
 		{
+			if ( useQueue )
+			{
+				McpReplicationQueue.Enqueue( () =>
+				{
+					var prefabType = TypeLibrary.GetType( "Sandbox.Prefab" );
+					if ( prefabType == null ) return;
+					var loadMethod = prefabType.Methods.FirstOrDefault( m => m.Name == "Load" );
+					var cloneMethod = prefabType.Methods.FirstOrDefault( m => m.Name == "Clone" );
+					if ( loadMethod == null || cloneMethod == null ) return;
+
+					var prefab = loadMethod.Invoke( null, new object[] { prefabPath } );
+					if ( prefab == null ) return;
+
+					cloneMethod.Invoke( prefab, new object[] { new Vector3( x, y, z ) } );
+				} );
+				return new { success = true, queued = true, path = prefabPath, position = new { x, y, z } };
+			}
+
 			var prefabType = TypeLibrary.GetType( "Sandbox.Prefab" );
 			if ( prefabType == null ) return new { error = "Prefab type not found" };
 			var loadMethod = prefabType.Methods.FirstOrDefault( m => m.Name == "Load" );

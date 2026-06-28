@@ -535,6 +535,16 @@ public sealed class {className} : Component
 					}
 				}
 
+				var usings = root.DescendantNodes().OfType<UsingDirectiveSyntax>();
+				foreach ( var u in usings )
+				{
+					var name = u.Name.ToString();
+					if ( name == "System.Runtime.InteropServices" || name == "System.Reflection" )
+					{
+						violations.Add( $"Forbidden using directive: '{name}' violates immutable core axioms." );
+					}
+				}
+
 				if ( violations.Count > 0 )
 				{
 					return new
@@ -598,5 +608,100 @@ public sealed class {className} : Component
 				return new { success = false, error = e.Message };
 			}
 		}, new { type = "object", properties = new { code = new { type = "string", description = "C# source code to dry-run" }, filename = new { type = "string", description = "Mock filename (default DryRunTemp.cs)" } }, required = new[] { "code" } } );
+
+		McpEditorServer.RegisterTool( "sbox_profile_code_allocation", "Compiles and executes a C# code snippet in memory, measuring the heap memory allocated by the snippet with zero overhead using CoreCLR runtime monitoring.", args =>
+		{
+			var code = args.GetProperty( "code" ).GetString() ?? "";
+
+			try
+			{
+				if ( !code.Contains( "class" ) )
+				{
+					code = @"
+using System;
+using System.Collections.Generic;
+using Sandbox;
+
+public static class CodeEvaluator
+{
+	public static void Run()
+	{
+		" + code + @"
+	}
+}";
+				}
+
+				var syntaxTree = CSharpSyntaxTree.ParseText( code );
+				var assemblyName = System.IO.Path.GetRandomFileName();
+				
+				var references = AppDomain.CurrentDomain.GetAssemblies()
+					.Where( a => !a.IsDynamic && !string.IsNullOrEmpty( a.Location ) )
+					.Select( a => MetadataReference.CreateFromFile( a.Location ) )
+					.Cast<MetadataReference>()
+					.ToList();
+
+				var compilation = CSharpCompilation.Create(
+					assemblyName,
+					new[] { syntaxTree },
+					references,
+					new CSharpCompilationOptions( OutputKind.DynamicallyLinkedLibrary ) );
+
+				using var ms = new System.IO.MemoryStream();
+				var result = compilation.Emit( ms );
+
+				if ( !result.Success )
+				{
+					var errors = result.Diagnostics
+						.Where( d => d.Severity == DiagnosticSeverity.Error )
+						.Select( d => d.GetMessage() )
+						.ToList();
+					return new { success = false, error = "Compilation failed", details = errors };
+				}
+
+				ms.Seek( 0, System.IO.SeekOrigin.Begin );
+				var assembly = System.Reflection.Assembly.Load( ms.ToArray() );
+				var type = assembly.GetTypes().FirstOrDefault( t => t.Name.Contains( "Evaluator" ) );
+				if ( type == null )
+				{
+					return new { success = false, error = "No evaluator class found. Ensure a class name contains 'Evaluator'." };
+				}
+				var method = type.GetMethod( "Run", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static );
+				if ( method == null )
+				{
+					return new { success = false, error = "No static void Run() method found in evaluator class." };
+				}
+
+				try { AppDomain.MonitoringIsEnabled = true; } catch { }
+
+				long startAllocated = 0;
+				try { startAllocated = AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize; } catch { }
+				long startGc = GC.GetTotalMemory( false );
+
+				var sw = System.Diagnostics.Stopwatch.StartNew();
+				
+				method.Invoke( null, null );
+				
+				sw.Stop();
+				long endGc = GC.GetTotalMemory( false );
+				long endAllocated = 0;
+				try { endAllocated = AppDomain.CurrentDomain.MonitoringTotalAllocatedMemorySize; } catch { }
+
+				long bytesAllocated = (endAllocated > startAllocated) ? (endAllocated - startAllocated) : (endGc - startGc);
+				if ( bytesAllocated < 0 ) bytesAllocated = 0;
+
+				return new
+				{
+					success = true,
+					durationMs = sw.Elapsed.TotalMilliseconds,
+					allocatedBytes = bytesAllocated,
+					allocatedMb = Math.Round( bytesAllocated / (1024f * 1024f), 4 ),
+					note = bytesAllocated > 5 * 1024 * 1024 ? "WARNING: High allocation count. Consider using object pools or caching structures to avoid GC spikes." : "Allocation footprint is within normal limits."
+				};
+			}
+			catch ( Exception e )
+			{
+				return new { success = false, error = e.Message, stackTrace = e.ToString() };
+			}
+		}, new { type = "object", properties = new { code = new { type = "string", description = "The C# code snippet containing an Evaluator class with static void Run() or raw statements." } }, required = new[] { "code" } } );
 	}
 }

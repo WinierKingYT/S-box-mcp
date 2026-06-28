@@ -3,6 +3,7 @@ using Sandbox;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 
 namespace McpBridge.Tools;
 
@@ -548,6 +549,88 @@ public class SceneTools
 	public object RewindState( float secondsAgo )
 	{
 		return McpStateTimeTravel.Rewind( secondsAgo );
+	}
+
+	[McpTool("sbox_balance_simulation", "Starts a high-speed RL balance simulation with timescale adjustments and sub-stepping stability optimization.", OptionalParams = new[]{"timeScale", "simulationDuration", "botCount"}, DestructiveHint = true)]
+	public object BalanceSimulation( float timeScale = 5.0f, float simulationDuration = 10.0f, int botCount = 10 )
+	{
+		var scene = Game.ActiveScene;
+		if ( scene == null ) return new { error = "No active scene" };
+
+		try
+		{
+#pragma warning disable 0612
+			var origTimeScale = scene.PhysicsWorld.TimeScale;
+			var origSubSteps = scene.PhysicsWorld.SubSteps;
+			var origPosIt = scene.PhysicsWorld.PositionIterations;
+			var origVelIt = scene.PhysicsWorld.VelocityIterations;
+
+			scene.PhysicsWorld.TimeScale = timeScale;
+			scene.PhysicsWorld.SubSteps = (int)(origSubSteps * timeScale);
+			scene.PhysicsWorld.PositionIterations = (int)(origPosIt * timeScale);
+			scene.PhysicsWorld.VelocityIterations = (int)(origVelIt * timeScale);
+#pragma warning restore 0612
+
+			var botType = TypeLibrary.GetType( "Pedestrian" );
+			var spawnedBots = new List<GameObject>();
+
+			if ( botType != null )
+			{
+				var rand = new Random();
+				for ( int i = 0; i < botCount; i++ )
+				{
+					var go = new GameObject( true, $"SimBot_{i}" );
+					go.SetParent( scene );
+					go.WorldPosition = new Vector3( rand.Next( -500, 500 ), rand.Next( -500, 500 ), 50 );
+					go.Components.Create( botType );
+					spawnedBots.Add( go );
+				}
+			}
+
+			var delayMs = (int)(simulationDuration * 1000f / timeScale);
+			RunSimulationTimer( scene, spawnedBots, origTimeScale, origSubSteps, origPosIt, origVelIt, delayMs );
+
+			return new
+			{
+				success = true,
+				message = "Balance simulation started.",
+				parameters = new
+				{
+					timeScale,
+					simulationDuration,
+					botCount,
+					estimatedRealDurationSeconds = delayMs / 1000f
+				},
+				botTypeResolved = botType != null
+			};
+		}
+		catch ( Exception e )
+		{
+			return new { error = e.Message };
+		}
+	}
+
+	private async void RunSimulationTimer( Scene scene, List<GameObject> bots, float origTimeScale, int origSubSteps, int origPosIt, int origVelIt, int delayMs )
+	{
+		await Task.Delay( delayMs );
+		
+		foreach ( var go in bots )
+		{
+			if ( go.IsValid() )
+			{
+				go.Destroy();
+			}
+		}
+
+		if ( scene.IsValid() )
+		{
+#pragma warning disable 0612
+			scene.PhysicsWorld.TimeScale = origTimeScale;
+			scene.PhysicsWorld.SubSteps = origSubSteps;
+			scene.PhysicsWorld.PositionIterations = origPosIt;
+			scene.PhysicsWorld.VelocityIterations = origVelIt;
+#pragma warning restore 0612
+		}
 	}
 
 	private static DirectionalLight FindDirectionalLight( Scene scene, string lightGuid = null )

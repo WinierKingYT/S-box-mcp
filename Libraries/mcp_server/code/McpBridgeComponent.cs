@@ -61,6 +61,7 @@ public sealed class McpBridgeComponent : Component
 	protected override void OnUpdate()
 	{
 		McpStateTimeTravel.Tick();
+		McpReplicationQueue.Tick();
 
 		lock ( _toasts )
 		{
