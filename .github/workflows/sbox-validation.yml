@@ -1,0 +1,30 @@
+name: s&box Full Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      sboxRoot:
+        description: Absolute path to the s&box installation on the runner
+        required: true
+        default: 'C:\Program Files (x86)\Steam\steamapps\common\sbox'
+
+permissions:
+  contents: read
+
+jobs:
+  editor-tests:
+    runs-on: [self-hosted, Windows, sbox]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Run complete editor and bridge test suite
+        shell: pwsh
+        run: |
+          $sboxRoot = '${{ inputs.sboxRoot }}'
+          dotnet test ./mcp_server.slnx `
+            -p:StaticWebAssetsEnabled=false `
+            "-p:SboxRoot=$sboxRoot"

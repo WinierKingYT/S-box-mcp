@@ -1,0 +1,16 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+  </Configurations>
+  <Folder Name="/Libraries/">
+    <Project Path="code/mcp_server.csproj" />
+    <Project Path="Editor/mcp_server.editor.csproj" />
+  </Folder>
+  <Folder Name="/Tests/">
+    <Project Path="Editor/unittest/mcp_server.editor.tests.csproj" />
+    <Project Path="tools/SboxMcp.StdioBridge.Tests/SboxMcp.StdioBridge.Tests.csproj" />
+  </Folder>
+  <Folder Name="/Distribution/">
+    <Project Path="tools/SboxMcp.StdioBridge/SboxMcp.StdioBridge.csproj" />
+  </Folder>
+</Solution>

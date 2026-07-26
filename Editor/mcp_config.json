@@ -1,0 +1,24 @@
+{
+  "ConfigVersion": 2,
+  "ApprovalMode": "AllMutations",
+  "ApprovalTimeoutSeconds": 600,
+  "MaxPendingApprovals": 50,
+  "MaxBatchOperations": 50,
+  "PersistHistory": true,
+  "HistoryLimit": 500,
+  "HistoryRetentionDays": 7,
+  "ApiKey": "",
+  "Port": 29017,
+  "MaxRequestsPerSecond": 20,
+  "RequestTimeoutMs": 30000,
+  "ScreenshotDirectory": "scratch",
+  "ScreenshotDirectoryBase": "Desktop",
+  "AutoLoadAssemblies": [
+    "mcp_server.dll",
+    "sbox_mcp.dll"
+  ],
+  "EnableSseKeepAlive": true,
+  "SseKeepAliveIntervalMs": 1000,
+  "CorsOrigins": [],
+  "EnableConsoleCommands": false
+}

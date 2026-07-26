@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a reproducible problem with the server, bridge, or installer
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include API keys or private project data.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: "1.2.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: client
+    attributes:
+      label: MCP client
+      options:
+        - Codex
+        - Claude Desktop
+        - Cursor
+        - Windsurf
+        - Direct HTTP
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and sanitized logs
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed API keys and private project data.
+          required: true

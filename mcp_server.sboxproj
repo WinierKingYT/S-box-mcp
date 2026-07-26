@@ -1,0 +1,16 @@
+{
+  "Name": "MCP AI Bridge",
+  "Description": "Yapay Zeka IDE'leri (Cursor, Claude, Windsurf) için s&box motoru canlı bağlantı köprüsü.",
+  "Type": "library",
+  "Metadata": {
+    "Compiler": {
+      "DefineConstants": [
+        "SANDBOX",
+        "MCP_ENABLED"
+      ],
+      "NoWarn": [
+        "1591"
+      ]
+    }
+  }
+}

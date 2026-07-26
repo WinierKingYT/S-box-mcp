@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "sbox": {
+      "command": "__BRIDGE_PATH__",
+      "args": [
+        "--url",
+        "http://localhost:29017/mcp",
+        "--api-key-env",
+        "SBOX_MCP_API_KEY"
+      ]
+    }
+  }
+}

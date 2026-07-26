@@ -1,0 +1,13 @@
+bin/
+obj/
+*.user
+.vs/
+*.sln
+dist/
+graphify-out/
+.sbox/
+.vscode/settings.json
+/mcp_config.json
+*.backup-*
+*.vtex_c
+*.db
